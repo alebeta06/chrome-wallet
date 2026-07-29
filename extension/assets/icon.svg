@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    Source icon for the extension. Rendered to PNG by scripts/generate-icons.mjs.
+    Kept out of public/ on purpose: the SVG must not ship to dist/.
+  -->
+  <defs>
+    <linearGradient id="cc" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7c5cff" />
+      <stop offset="1" stop-color="#3b1fa8" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#cc)" />
+  <path
+    d="M64 24 L96 44 L96 84 L64 104 L32 84 L32 44 Z"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="7"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M64 44 L80 54 L80 74 L64 84 L48 74 L48 54 Z"
+    fill="#ffffff"
+    opacity="0.9"
+  />
+</svg>
