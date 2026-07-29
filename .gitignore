@@ -6,6 +6,7 @@ dist/
 .env.*
 !.env.example
 .vite/
+.claude-flow/
 coverage/
 playwright-report/
 test-results/

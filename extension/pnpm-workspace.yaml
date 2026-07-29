@@ -1,0 +1,9 @@
+# pnpm 11 reads its settings from here, no longer from the "pnpm" field in package.json.
+#
+# 🇪🇸 NOTA: pnpm bloquea por defecto los scripts postinstall de las dependencias
+# (buena práctica de supply chain). esbuild y sharp traen binarios nativos y
+# necesitan el suyo, así que se autorizan explícitamente. Sin esto `pnpm install`
+# termina con código 1 y el build no es reproducible en una máquina limpia.
+allowBuilds:
+  esbuild: true
+  sharp: true

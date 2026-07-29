@@ -1,0 +1,29 @@
+{
+  "name": "@codecrypto/wallet-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeCrypto Wallet — Ethereum wallet as a Chrome MV3 extension",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "build": "pnpm typecheck && vite build && vite build -c vite.config.scripts.ts --mode content-script && vite build -c vite.config.scripts.ts --mode inject",
+    "icons": "node scripts/generate-icons.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.2",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "sharp": "^0.35.3",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6"
+  }
+}
