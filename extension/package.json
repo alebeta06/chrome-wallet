@@ -10,9 +10,12 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "build": "pnpm typecheck && vite build && vite build -c vite.config.scripts.ts --mode content-script && vite build -c vite.config.scripts.ts --mode inject",
+    "test": "vitest",
+    "test:run": "vitest run",
     "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
+    "ethers": "^6.17.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
@@ -24,6 +27,7 @@
     "@vitejs/plugin-react": "^5.2.0",
     "sharp": "^0.35.3",
     "typescript": "~5.9.3",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
   }
 }
