@@ -1,44 +1,37 @@
 /**
  * @file background.ts
- * @description Service worker. Phase 0 stub: it only proves the contract
- * compiles and runs from the most privileged context.
+ * @description Service worker. Thin adapter over chrome.runtime — every
+ * decision lives in lib/dispatch.ts, which is testable without a browser.
  *
- * This is the ONE script that is an ES module (`"type": "module"` in the
- * manifest), so it is allowed to keep `import` statements after bundling.
- *
- * 🇪🇸 NOTA: aquí es donde vivirán el mnemonic y las claves privadas a partir de
- * la Fase 2. Nada de lo que se escriba en este archivo puede filtrarse a una
- * página web salvo que lo devuelva explícitamente un método público.
+ * This is the only script that is an ES module, and the only place the mnemonic
+ * and private keys ever exist.
  */
 
-import {
-  PROTOCOL,
-  PROTOCOL_VERSION,
-  classifySender,
-  type RuntimeMessage,
-} from "@/types/messages";
+import { PROTOCOL, type RuntimeMessage } from "@/types/messages";
 
-console.log(`[${PROTOCOL}] background service worker alive — protocol v${PROTOCOL_VERSION}`);
+import { createDispatcher } from "@/lib/dispatch";
+import { createWalletStorage } from "@/lib/storage";
+
+const dispatch = createDispatcher({ storage: createWalletStorage() });
+
+console.log(`[${PROTOCOL}] background service worker alive`);
 
 /**
- * Phase 0 does not answer anything: it classifies the sender and logs it, so we
- * can see the trust boundary working before there is any logic behind it.
+ * 🇪🇸 NOTA: el gotcha de MV3 en Chrome. Esto NO funciona:
  *
- * 🇪🇸 NOTA: `classifySender` devuelve null si el mensaje no viene de nuestra
- * propia extensión, y marca `fromPage: true` cuando el emisor es un content
- * script. A partir de la Fase 4 ese booleano es lo único que separa
- * `wallet_importMnemonic` de cualquier web que visites.
+ *   chrome.runtime.onMessage.addListener(async (msg) => handle(msg));
+ *
+ * Devolver una Promise desde el listener es la API de Firefox. Chrome la
+ * ignora, cierra el canal al volver el listener y el emisor recibe `undefined`
+ * sin ningún error. La forma correcta es `sendResponse` + `return true`, que le
+ * dice a Chrome "voy a responder más tarde, no cierres el canal".
+ *
+ * `return false` para todo lo que no sea nuestro: devolver `true` sin intención
+ * de responder deja el canal colgado hasta que expira.
  */
-chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender) => {
-  const context = classifySender(sender, chrome.runtime.id);
+chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
+  if (message?.type !== "CODECRYPTO_RPC") return false;
 
-  if (context === null) {
-    console.warn(`[${PROTOCOL}] background dropped a message from a foreign sender`);
-    return false;
-  }
-
-  console.log(`[${PROTOCOL}] background received ${message.type}`, context);
-
-  // No async response in phase 0.
-  return false;
+  void dispatch(message, sender, chrome.runtime.id).then(sendResponse);
+  return true;
 });
