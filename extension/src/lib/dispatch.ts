@@ -23,18 +23,32 @@ import {
   assertSenderMayCall,
   classifySender,
   type Address,
+  type Hex,
+  type NetworkConfig,
   type RpcRequestMessage,
   type RpcResponseMessage,
   type WalletSnapshot,
 } from "@/types/messages";
 
+import { fetchBalances as defaultFetchBalances, type BalanceReader } from "./chain";
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
-import { createMnemonic, deriveAddresses } from "./hd-wallet";
+import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
 import { DEFAULT_CHAIN_ID, defaultNetworks } from "./networks";
 import type { WalletStorage } from "./storage";
 
 export interface DispatcherDeps {
   storage: WalletStorage;
+  /**
+   * Injected so the RPC handlers can be tested without a node running — the
+   * same reason StorageArea is injected.
+   */
+  fetchBalances?: BalanceReader;
+}
+
+/** Everything the handlers are allowed to reach. Nothing is a module global. */
+interface HandlerContext {
+  storage: WalletStorage;
+  fetchBalances: BalanceReader;
 }
 
 export type Dispatcher = (
@@ -48,7 +62,12 @@ export type Dispatcher = (
  * `RpcResponseMessage`, because the caller on the other side of the bridge has
  * no way to observe a rejection.
  */
-export function createDispatcher({ storage }: DispatcherDeps): Dispatcher {
+export function createDispatcher({
+  storage,
+  fetchBalances = defaultFetchBalances,
+}: DispatcherDeps): Dispatcher {
+  const deps: HandlerContext = { storage, fetchBalances };
+
   return async function dispatch(message, sender, runtimeId) {
     // 1. Who is asking? A null answer means the message did not even come from
     //    this extension.
@@ -63,7 +82,7 @@ export function createDispatcher({ storage }: DispatcherDeps): Dispatcher {
       if (denied !== null) return failure(message.id, denied);
 
       // 3. Only now does any work happen.
-      const result = await handle(storage, message.method, message.params);
+      const result = await handle(deps, message.method, message.params);
       return { type: "CODECRYPTO_RPC_RESULT", id: message.id, ok: true, result };
     } catch (cause) {
       return failure(message.id, toSerializedError(cause, context.fromPage));
@@ -76,7 +95,7 @@ function failure(id: string, error: ReturnType<typeof ProviderErrors.internal>):
 }
 
 async function handle(
-  storage: WalletStorage,
+  { storage, fetchBalances }: HandlerContext,
   method: string,
   params: unknown[],
 ): Promise<unknown> {
@@ -87,6 +106,10 @@ async function handle(
       return handleImportMnemonic(storage, params);
     case "wallet_getState":
       return handleGetState(storage);
+    case "wallet_getBalances":
+      return handleGetBalances(storage, fetchBalances, params);
+    case "wallet_setDefaultAccount":
+      return handleSetDefaultAccount(storage, params);
     case "wallet_reset":
       return handleReset(storage);
     default:
@@ -153,9 +176,78 @@ async function handleGetState(storage: WalletStorage): Promise<WalletSnapshot> {
   };
 }
 
+async function handleGetBalances(
+  storage: WalletStorage,
+  fetchBalances: BalanceReader,
+  params: unknown[],
+): Promise<Record<Address, Hex>> {
+  const { addresses } = parseGetBalancesParams(params);
+  const network = await resolveActiveNetwork(storage);
+
+  return fetchBalances(network, addresses);
+}
+
+/**
+ * Changes the wallet-wide default account.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS METHOD EMITS NOTHING
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: aquí está la mitad fácil de la asimetría que define el modelo de
+ * cuenta por origen. La cuenta por defecto es una preferencia INTERNA de la
+ * wallet: se usa para transferencias internas y como preselección en
+ * connect.html. Ninguna dApp tiene por qué enterarse de que ha cambiado.
+ *
+ * La otra mitad llega en la Fase 8: `wallet_setSiteAccount` SÍ emite
+ * accountsChanged, y solo a las pestañas del origen afectado. Si alguien
+ * añadiera emisión a ESTE método, la dApp A se enteraría de qué cuenta usas en
+ * la dApp B — que es exactamente la fuga que el modelo por origen existe para
+ * evitar.
+ *
+ * Fíjate en que esta función no lee `cc:connectedSites` en ningún momento: no
+ * puede dirigirse a un origen ni aunque quisiera. Hay un test que lo comprueba.
+ */
+async function handleSetDefaultAccount(
+  storage: WalletStorage,
+  params: unknown[],
+): Promise<null> {
+  const { accountIndex } = parseSetDefaultAccountParams(params);
+  const accounts = (await storage.get("cc:accounts")) ?? [];
+
+  if (accounts.length === 0) {
+    throw invalidParams("There is no wallet loaded, so no account can be selected.");
+  }
+  if (!Number.isInteger(accountIndex) || accountIndex < 0 || accountIndex >= accounts.length) {
+    throw invalidParams(
+      `Account index must be an integer between 0 and ${accounts.length - 1}.`,
+    );
+  }
+
+  await storage.set("cc:defaultAccountIndex", accountIndex);
+  return null;
+}
+
 async function handleReset(storage: WalletStorage): Promise<null> {
   await storage.resetWallet();
   return null;
+}
+
+/** The NetworkConfig matching cc:chainId, or 4902 if it is not in the catalogue. */
+async function resolveActiveNetwork(storage: WalletStorage): Promise<NetworkConfig> {
+  const [chainId, networks] = await Promise.all([
+    storage.get("cc:chainId"),
+    storage.get("cc:networks"),
+  ]);
+
+  const activeChainId = chainId ?? DEFAULT_CHAIN_ID;
+  const network = (networks ?? defaultNetworks()).find(
+    (candidate) => candidate.chainId === activeChainId,
+  );
+
+  if (network === undefined) {
+    throw new ProviderError(ProviderErrors.unrecognizedChain(activeChainId));
+  }
+  return network;
 }
 
 /**
@@ -187,4 +279,41 @@ function parseImportParams(params: unknown[]): { phrase: string; accountCount: n
   }
 
   return { phrase, accountCount };
+}
+
+const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+
+function parseGetBalancesParams(params: unknown[]): { addresses: Address[] } {
+  const [raw] = params;
+  if (typeof raw !== "object" || raw === null) {
+    throw invalidParams("wallet_getBalances expects a single object parameter.");
+  }
+
+  const { addresses } = raw as { addresses?: unknown };
+
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw invalidParams('wallet_getBalances requires a non-empty "addresses" array.');
+  }
+  if (addresses.length > MAX_ACCOUNTS) {
+    throw invalidParams(`wallet_getBalances accepts at most ${MAX_ACCOUNTS} addresses.`);
+  }
+  if (!addresses.every((entry) => typeof entry === "string" && ADDRESS_PATTERN.test(entry))) {
+    throw invalidParams("wallet_getBalances received a malformed address.");
+  }
+
+  return { addresses: addresses as Address[] };
+}
+
+function parseSetDefaultAccountParams(params: unknown[]): { accountIndex: number } {
+  const [raw] = params;
+  if (typeof raw !== "object" || raw === null) {
+    throw invalidParams("wallet_setDefaultAccount expects a single object parameter.");
+  }
+
+  const { accountIndex } = raw as { accountIndex?: unknown };
+  if (typeof accountIndex !== "number") {
+    throw invalidParams('wallet_setDefaultAccount requires an "accountIndex" number.');
+  }
+
+  return { accountIndex };
 }
