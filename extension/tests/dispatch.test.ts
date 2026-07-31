@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ErrorCode, type RpcRequestMessage, type RpcResponseMessage, type WalletSnapshot } from "@/types/messages";
 import { createDispatcher } from "@/lib/dispatch";
-import { createWalletStorage } from "@/lib/storage";
-import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID } from "@/lib/networks";
+import { createWalletStorage, type StorageArea } from "@/lib/storage";
+import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID, defaultNetworks } from "@/lib/networks";
+import { ProviderError } from "@/lib/errors";
+import type { BalanceReader } from "@/lib/chain";
 import { createMemoryStorageArea } from "./helpers/memory-storage-area";
 
 const RUNTIME_ID = "codecryptowalletextensionidaaaa";
@@ -57,9 +59,32 @@ function request(method: string, params: unknown[] = []): RpcRequestMessage {
   return { type: "CODECRYPTO_RPC", id: "req-1", method, params };
 }
 
-function setup(seed: Record<string, unknown> = {}) {
+function setup(seed: Record<string, unknown> = {}, fetchBalances?: BalanceReader) {
   const area = createMemoryStorageArea(seed);
-  return { area, dispatch: createDispatcher({ storage: createWalletStorage(area) }) };
+
+  /**
+   * Records which storage keys were READ. Used by the no-emission test below:
+   * a method that never asks for cc:connectedSites structurally cannot target
+   * a dApp origin.
+   */
+  const readKeys: string[] = [];
+  const observedArea: StorageArea = {
+    get(keys) {
+      readKeys.push(...keys);
+      return area.get(keys);
+    },
+    set: (items) => area.set(items),
+    remove: (keys) => area.remove(keys),
+  };
+
+  return {
+    area,
+    readKeys,
+    dispatch: createDispatcher({
+      storage: createWalletStorage(observedArea),
+      ...(fetchBalances === undefined ? {} : { fetchBalances }),
+    }),
+  };
 }
 
 function expectError(response: RpcResponseMessage, code: number): void {
@@ -441,5 +466,234 @@ describe("unexpected failures", () => {
     if (response.ok) throw new Error("expected a failure response");
     expect(response.error.message).toBe("storage exploded");
     expect(response.error.data).toMatchObject({ name: "Error", message: "storage exploded" });
+  });
+});
+
+const ANVIL_SECOND = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+const ONE_ETH = "0xde0b6b3a7640000";
+
+/** A wallet mid-life: imported, with a non-zero default account selected. */
+const LOADED_WALLET = {
+  "cc:mnemonic": ANVIL_PHRASE,
+  "cc:accounts": [ANVIL_FIRST, ANVIL_SECOND],
+  "cc:defaultAccountIndex": 0,
+  "cc:chainId": ANVIL_CHAIN_ID,
+};
+
+describe("wallet_getBalances", () => {
+  it("asks the reader for the active network and returns what it says", async () => {
+    const reader = vi.fn<BalanceReader>(async () => ({ [ANVIL_FIRST]: ONE_ETH }));
+    const { dispatch } = setup(LOADED_WALLET, reader);
+
+    const response = await dispatch(
+      request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expect(expectResult<Record<string, string>>(response)).toEqual({ [ANVIL_FIRST]: ONE_ETH });
+    expect(reader).toHaveBeenCalledTimes(1);
+    expect(reader.mock.calls[0][0].chainId).toBe(ANVIL_CHAIN_ID);
+    expect(reader.mock.calls[0][1]).toEqual([ANVIL_FIRST]);
+  });
+
+  it("follows cc:chainId to a different network", async () => {
+    const reader = vi.fn<BalanceReader>(async () => ({}));
+    const { dispatch } = setup({ ...LOADED_WALLET, "cc:chainId": SEPOLIA_CHAIN_ID }, reader);
+
+    await dispatch(request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]), uiSender(), RUNTIME_ID);
+
+    expect(reader.mock.calls[0][0].chainId).toBe(SEPOLIA_CHAIN_ID);
+    expect(reader.mock.calls[0][0].rpcUrl).toBe("https://sepolia.drpc.org");
+  });
+
+  /**
+   * 🇪🇸 NOTA: 4901 y no -32603, y la diferencia es lo que hace que el popup
+   * pueda seguir siendo útil con Anvil apagado. -32603 significa "hay un bug";
+   * 4901 significa "tu wallet está bien, el nodo no contesta". La UI muestra las
+   * cuentas igual y solo avisa de los saldos.
+   */
+  it("surfaces an unreachable node as 4901, not as an opaque internal error", async () => {
+    const reader = vi.fn<BalanceReader>(async () => {
+      throw new ProviderError({
+        code: ErrorCode.CHAIN_DISCONNECTED,
+        message: "Cannot reach the RPC endpoint for Anvil Local.",
+      });
+    });
+    const { dispatch } = setup(LOADED_WALLET, reader);
+
+    const response = await dispatch(
+      request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expectError(response, ErrorCode.CHAIN_DISCONNECTED);
+    expect(response.ok).toBe(false);
+  });
+
+  it("answers 4902 when cc:chainId is not in the catalogue", async () => {
+    const reader = vi.fn<BalanceReader>(async () => ({}));
+    const { dispatch } = setup({ ...LOADED_WALLET, "cc:chainId": "0xdead" }, reader);
+
+    const response = await dispatch(
+      request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expectError(response, ErrorCode.UNRECOGNIZED_CHAIN);
+    expect(reader).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no parameters", [] as unknown[]],
+    ["an empty address list", [{ addresses: [] }]],
+    ["a missing address list", [{}]],
+    ["a malformed address", [{ addresses: ["0xnothex"] }]],
+    ["an address of the wrong length", [{ addresses: ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb922"] }]],
+    ["a non-string entry", [{ addresses: [42] }]],
+  ])("rejects %s with -32602 and never reaches the network", async (_label, params) => {
+    const reader = vi.fn<BalanceReader>(async () => ({}));
+    const { dispatch } = setup(LOADED_WALLET, reader);
+
+    expectError(
+      await dispatch(request("wallet_getBalances", params), uiSender(), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+    expect(reader).not.toHaveBeenCalled();
+  });
+
+  it("is not reachable from a web page", async () => {
+    const reader = vi.fn<BalanceReader>(async () => ({}));
+    const { dispatch } = setup(LOADED_WALLET, reader);
+
+    expectError(
+      await dispatch(request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]), pageSender(), RUNTIME_ID),
+      ErrorCode.UNAUTHORIZED,
+    );
+    expect(reader).not.toHaveBeenCalled();
+  });
+});
+
+describe("wallet_setDefaultAccount", () => {
+  it("stores a valid index", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+
+    const response = await dispatch(
+      request("wallet_setDefaultAccount", [{ accountIndex: 1 }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expect(expectResult<null>(response)).toBeNull();
+    expect(area.snapshot()["cc:defaultAccountIndex"]).toBe(1);
+  });
+
+  it.each([
+    ["an index past the end", 2],
+    ["a negative index", -1],
+    ["a non-integer index", 1.5],
+  ])("rejects %s with -32602 and leaves the stored index alone", async (_label, accountIndex) => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+
+    expectError(
+      await dispatch(request("wallet_setDefaultAccount", [{ accountIndex }]), uiSender(), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+    expect(area.snapshot()["cc:defaultAccountIndex"]).toBe(0);
+  });
+
+  it("rejects when no wallet is loaded", async () => {
+    const { dispatch } = setup();
+
+    expectError(
+      await dispatch(request("wallet_setDefaultAccount", [{ accountIndex: 0 }]), uiSender(), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+  });
+
+  it("is not reachable from a web page", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+
+    expectError(
+      await dispatch(request("wallet_setDefaultAccount", [{ accountIndex: 1 }]), pageSender(), RUNTIME_ID),
+      ErrorCode.UNAUTHORIZED,
+    );
+    expect(area.snapshot()["cc:defaultAccountIndex"]).toBe(0);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE ASYMMETRY THAT DEFINES THE PER-ORIGIN ACCOUNT MODEL
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: el contrato define dos métodos que cambian una cuenta, y solo uno
+   * emite:
+   *
+   *   wallet_setDefaultAccount -> preferencia interna. NO emite nada.
+   *   wallet_setSiteAccount    -> vínculo con un origen. Emite accountsChanged,
+   *                               y SOLO a las pestañas de ese origen (Fase 8).
+   *
+   * Si en la Fase 8 alguien añade la emisión al método equivocado, la dApp A se
+   * entera de qué cuenta usas en la dApp B. La ventana para ese error es dentro
+   * de seis fases; el test que lo impide cuesta escribirlo hoy.
+   *
+   * La comprobación es ESTRUCTURAL, no un espía sobre chrome.tabs: se afirma que
+   * este método no lee `cc:connectedSites` en ningún momento. Sin esa lectura no
+   * hay forma de saber a qué origen dirigirse, así que la emisión por origen es
+   * imposible de añadir aquí sin que el test se entere.
+   */
+  it("emits nothing: it never even reads the connected sites", async () => {
+    const { readKeys, dispatch } = setup({
+      ...LOADED_WALLET,
+      "cc:connectedSites": { "https://dapp.example": { origin: "https://dapp.example", accountIndex: 1, connectedAt: 0, lastUsedAt: 0 } },
+    });
+
+    await dispatch(request("wallet_setDefaultAccount", [{ accountIndex: 1 }]), uiSender(), RUNTIME_ID);
+
+    expect(readKeys).not.toContain("cc:connectedSites");
+  });
+
+  it("writes only cc:defaultAccountIndex", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+    const before = area.snapshot();
+
+    await dispatch(request("wallet_setDefaultAccount", [{ accountIndex: 1 }]), uiSender(), RUNTIME_ID);
+
+    const after = area.snapshot();
+    const changed = Object.keys(after).filter(
+      (key) => JSON.stringify(after[key]) !== JSON.stringify(before[key]),
+    );
+    expect(changed).toEqual(["cc:defaultAccountIndex"]);
+  });
+
+  /**
+   * The control for the two assertions above. A negative test is worthless if
+   * the mechanism behind it can never fire, so this proves the recorder really
+   * does capture the reads a handler makes.
+   */
+  it("(control) the read recorder captures every key a handler reads", async () => {
+    const { readKeys, dispatch } = setup(LOADED_WALLET);
+
+    await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID);
+
+    expect(readKeys).toEqual(
+      expect.arrayContaining([
+        "cc:mnemonic",
+        "cc:accounts",
+        "cc:defaultAccountIndex",
+        "cc:chainId",
+        "cc:networks",
+      ]),
+    );
+  });
+});
+
+describe("the default network catalogue", () => {
+  it("hands out a fresh copy so a handler cannot mutate it", () => {
+    const first = defaultNetworks();
+    first[0].name = "tampered";
+
+    expect(defaultNetworks()[0].name).toBe("Anvil Local");
   });
 });
