@@ -1,12 +1,34 @@
-/**
- * The extension popup, opened by clicking the toolbar icon.
- * Phase 0: renders its own name and nothing else.
- */
+import { Onboarding } from "@/ui/components/Onboarding";
+import { WalletView } from "@/ui/components/WalletView";
+import { useWalletState } from "@/ui/hooks/useWalletState";
+
 export function Popup() {
+  const { snapshot, error, isLoading, refresh } = useWalletState();
+
   return (
-    <main style={{ font: "14px system-ui, sans-serif", padding: "1rem", minWidth: 320 }}>
-      <h1 style={{ fontSize: "1rem", margin: 0 }}>CodeCrypto Wallet</h1>
-      <p style={{ margin: "0.5rem 0 0", opacity: 0.7 }}>Popup</p>
+    <main className="popup">
+      <header className="app-header">
+        <h1>CodeCrypto Wallet</h1>
+      </header>
+
+      {snapshot === null && isLoading && (
+        <p className="muted" data-testid="popup-loading">
+          Loading…
+        </p>
+      )}
+
+      {snapshot === null && !isLoading && (
+        <p className="banner banner--error" data-testid="wallet-error-banner">
+          {error?.message ?? "The wallet state could not be read."}
+        </p>
+      )}
+
+      {snapshot !== null &&
+        (snapshot.isLoaded ? (
+          <WalletView snapshot={snapshot} onChanged={() => void refresh()} />
+        ) : (
+          <Onboarding onReady={() => void refresh()} />
+        ))}
     </main>
   );
 }
