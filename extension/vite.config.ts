@@ -66,7 +66,13 @@ export default defineConfig({
          */
         entryFileNames: (chunk) =>
           chunk.name === "background" ? "background.js" : "assets/[name]-[hash].js",
-        chunkFileNames: "assets/[name]-[hash].js",
+        /**
+         * Shared chunks get a neutral name. Rollup names them after whichever
+         * module happens to be first, which produced a 193 kB React bundle
+         * called "styles-<hash>.js" — a file name that actively misleads
+         * anyone reading dist/.
+         */
+        chunkFileNames: "assets/chunk-[hash].js",
         assetFileNames: "assets/[name]-[hash].[ext]",
       },
     },

@@ -1,0 +1,366 @@
+/*
+ * Shared stylesheet for the three extension surfaces.
+ *
+ * No Tailwind and no component library on purpose: Tailwind's build step fights
+ * the three-pass multi-entry setup, and a component library would outweigh the
+ * whole extension. Custom properties are enough for a surface this small.
+ */
+
+:root {
+  --bg: #0f1115;
+  --surface: #181b22;
+  --surface-hover: #1f232c;
+  --border: #272c37;
+  --text: #e6e8ee;
+  --text-muted: #8b93a7;
+  --accent: #7c5cff;
+  --accent-text: #ffffff;
+  --error: #ff6b6b;
+  --success: #4ade80;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  --radius: 8px;
+
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 360px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Approval windows are opened with their own size and must not be clamped. */
+body.surface-window {
+  width: 100%;
+  min-width: 320px;
+}
+
+/* --------------------------------------------------------------------------
+   Layout
+   -------------------------------------------------------------------------- */
+
+.popup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.stack--tight {
+  gap: var(--space-2);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.row--between {
+  justify-content: space-between;
+}
+
+/* --------------------------------------------------------------------------
+   Typography
+   -------------------------------------------------------------------------- */
+
+h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+p {
+  margin: 0;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+}
+
+/* --------------------------------------------------------------------------
+   Header
+   -------------------------------------------------------------------------- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.network-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.network-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.network-badge__dot--offline {
+  background: var(--error);
+}
+
+/* --------------------------------------------------------------------------
+   Controls
+   -------------------------------------------------------------------------- */
+
+button {
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.button--primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  background: var(--accent);
+}
+
+.button--danger {
+  color: var(--error);
+  border-color: var(--error);
+  background: transparent;
+}
+
+.button--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  padding: var(--space-1) var(--space-2);
+}
+
+.button--block {
+  width: 100%;
+}
+
+.button--icon {
+  padding: var(--space-1) var(--space-2);
+  font-size: 11px;
+}
+
+textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  width: 100%;
+  min-height: 76px;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  resize: vertical;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+/*
+ * Visible focus on everything interactive. Required for keyboard users, and
+ * Playwright leans on focus order in phase 10.
+ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Accounts
+   -------------------------------------------------------------------------- */
+
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: left;
+}
+
+.account-row--default {
+  border-color: var(--accent);
+}
+
+.account-row__index {
+  width: 18px;
+  flex: none;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.account-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.account-row__address {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.account-row__balance {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.account-row__default-mark {
+  color: var(--accent);
+  font-size: 11px;
+  flex: none;
+}
+
+/* --------------------------------------------------------------------------
+   Mnemonic
+   -------------------------------------------------------------------------- */
+
+.mnemonic-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.mnemonic-word {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.mnemonic-word__index {
+  color: var(--text-muted);
+  font-size: 10px;
+  min-width: 14px;
+  text-align: right;
+}
+
+/* --------------------------------------------------------------------------
+   Banners
+   -------------------------------------------------------------------------- */
+
+.banner {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+
+.banner--error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.banner--warn {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.feedback {
+  font-size: 11px;
+  min-height: 16px;
+}
+
+.feedback--ok {
+  color: var(--success);
+}
+
+.feedback--bad {
+  color: var(--error);
+}
