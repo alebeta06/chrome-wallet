@@ -10,19 +10,44 @@ const RUNTIME_ID = "codecryptowalletextensionidaaaa";
 const ANVIL_PHRASE = "test test test test test test test test test test test junk";
 const ANVIL_FIRST = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
-/** The extension's own UI: no tab, so classifySender reports fromPage: false. */
+/**
+ * The popup. Opened from the toolbar, so Chrome reports no tab at all.
+ *
+ * 🇪🇸 NOTA: éste es el caso fácil de la UI de la extensión. El difícil —una
+ * página de la extensión que SÍ trae tab— es `extensionWindowSender`, abajo.
+ */
 function uiSender(): chrome.runtime.MessageSender {
   return {
     id: RUNTIME_ID,
     origin: `chrome-extension://${RUNTIME_ID}`,
-    url: `chrome-extension://${RUNTIME_ID}/connect.html`,
+    url: `chrome-extension://${RUNTIME_ID}/index.html`,
   };
 }
 
 /**
- * A web page. The only thing that makes it one, as far as the contract is
- * concerned, is `tab` being defined — which a page cannot fake, because Chrome
- * fills it in.
+ * connect.html or notification.html, opened with chrome.windows.create.
+ *
+ * 🇪🇸 NOTA: éste es el sender que rompía la suposición original. Una ventana de
+ * aprobación vive en su propia pestaña, así que Chrome rellena `sender.tab`
+ * exactamente igual que para una web. Si la frontera se decidiera solo con
+ * `tab !== undefined`, nuestras propias ventanas de firma cobrarían un 4100 y la
+ * wallet no podría aprobar nada. Lo que las separa es el origin.
+ */
+function extensionWindowSender(): chrome.runtime.MessageSender {
+  return {
+    id: RUNTIME_ID,
+    origin: `chrome-extension://${RUNTIME_ID}`,
+    url: `chrome-extension://${RUNTIME_ID}/connect.html`,
+    tab: { id: 99 } as chrome.tabs.Tab,
+  };
+}
+
+/**
+ * A web page talking through its content script.
+ *
+ * `origin` is what makes it a page: `tab` alone is not enough, because our own
+ * approval windows have one too. Chrome fills both in, and neither is
+ * forgeable from the page.
  */
 function pageSender(origin = "https://dapp.example"): chrome.runtime.MessageSender {
   return { id: RUNTIME_ID, origin, url: `${origin}/`, tab: { id: 42 } as chrome.tabs.Tab };
@@ -82,7 +107,11 @@ describe("the trust boundary", () => {
 
   it("rejects a sender that is not this extension", async () => {
     const { dispatch } = setup();
-    const foreign: chrome.runtime.MessageSender = { id: "some-other-extension-id" };
+    const foreign: chrome.runtime.MessageSender = {
+      id: "someotherextensionidbbbbbbbbbbbb",
+      origin: "chrome-extension://someotherextensionidbbbbbbbbbbbb",
+      url: "chrome-extension://someotherextensionidbbbbbbbbbbbb/popup.html",
+    };
 
     expectError(await dispatch(request("wallet_getState"), foreign, RUNTIME_ID), ErrorCode.UNAUTHORIZED);
   });
@@ -97,6 +126,101 @@ describe("the trust boundary", () => {
   it("answers an unknown method with 4200", async () => {
     const { dispatch } = setup();
     expectError(await dispatch(request("wallet_doesNotExist"), uiSender(), RUNTIME_ID), ErrorCode.UNSUPPORTED_METHOD);
+  });
+});
+
+/**
+ * Regression tests for the sender classification fix.
+ *
+ * 🇪🇸 NOTA: la suite anterior tenía 68 tests en verde ANTES y DESPUÉS del
+ * arreglo del contrato, o sea que ninguno cubría el caso. El motivo es que
+ * todos los senders con `tab` que se usaban eran webs, y todos los senders de la
+ * UI no tenían `tab`. La combinación peligrosa —tab definido Y origin propio—
+ * no aparecía en ninguna parte, así que el bug era invisible para los tests.
+ *
+ * Lo que decide la frontera es el origin, no la presencia de `tab`:
+ *
+ *   tab + origin propio        -> UI de la extensión, puede llamar a todo
+ *   tab + origin de una web    -> página, solo métodos públicos
+ *   tab + origin de otra ext.  -> página, solo métodos públicos
+ */
+describe("sender classification", () => {
+  const INTERNAL_METHOD = "wallet_getState";
+
+  it("allows an internal method from an extension page that has a tab", async () => {
+    const { dispatch } = setup();
+
+    const response = await dispatch(request(INTERNAL_METHOD), extensionWindowSender(), RUNTIME_ID);
+
+    // connect.html and notification.html live in their own window, so they carry
+    // a tab. Rejecting them would make every approval flow impossible.
+    const snapshot = expectResult<WalletSnapshot>(response);
+    expect(snapshot.isLoaded).toBe(false);
+  });
+
+  it.each([
+    "wallet_getState",
+    "wallet_createMnemonic",
+    "wallet_importMnemonic",
+    "wallet_reset",
+  ])("allows %s from an extension page that has a tab", async (method) => {
+    const { dispatch } = setup();
+
+    const response = await dispatch(
+      request(method, method === "wallet_importMnemonic" ? [{ phrase: ANVIL_PHRASE, accountCount: 1 }] : []),
+      extensionWindowSender(),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(true);
+  });
+
+  it("still rejects an internal method from a web page that has a tab", async () => {
+    const { dispatch } = setup();
+
+    const response = await dispatch(request(INTERNAL_METHOD), pageSender("https://dapp.example"), RUNTIME_ID);
+
+    expectError(response, ErrorCode.UNAUTHORIZED);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el caso que hace que la comprobación tenga que ser contra el
+   * runtimeId concreto y no contra el prefijo "chrome-extension://". Otra
+   * extensión instalada en el mismo navegador puede inyectar su propio content
+   * script y hablarnos; su origin también empieza por chrome-extension://. Si la
+   * regla fuera "empieza por chrome-extension:// = de confianza", cualquier otra
+   * extensión del navegador podría vaciarte la wallet.
+   */
+  it("treats another extension's page as a web page", async () => {
+    const { dispatch } = setup();
+    const otherExtension: chrome.runtime.MessageSender = {
+      // Same id: this is OUR content script reporting a page whose origin
+      // happens to belong to a different extension.
+      id: RUNTIME_ID,
+      origin: "chrome-extension://someotherextensionidbbbbbbbbbbbb",
+      url: "chrome-extension://someotherextensionidbbbbbbbbbbbb/page.html",
+      tab: { id: 13 } as chrome.tabs.Tab,
+    };
+
+    expectError(await dispatch(request(INTERNAL_METHOD), otherExtension, RUNTIME_ID), ErrorCode.UNAUTHORIZED);
+  });
+
+  it("does not let an origin that merely contains the runtime id through", async () => {
+    const { dispatch } = setup();
+    const lookalike: chrome.runtime.MessageSender = {
+      id: RUNTIME_ID,
+      origin: `https://chrome-extension.${RUNTIME_ID}.example`,
+      url: `https://chrome-extension.${RUNTIME_ID}.example/`,
+      tab: { id: 14 } as chrome.tabs.Tab,
+    };
+
+    expectError(await dispatch(request(INTERNAL_METHOD), lookalike, RUNTIME_ID), ErrorCode.UNAUTHORIZED);
+  });
+
+  it("keeps letting the tabless popup through", async () => {
+    const { dispatch } = setup();
+
+    expect((await dispatch(request(INTERNAL_METHOD), uiSender(), RUNTIME_ID)).ok).toBe(true);
   });
 });
 
