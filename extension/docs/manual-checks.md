@@ -120,3 +120,104 @@ Es el fallo número uno de MV3 y conviene verlo una vez:
 Esperado: sigue devolviendo las 5 cuentas. El worker resucita y **relee todo de
 storage**. Si algún día esto devolviera una wallet vacía, es que alguien metió
 una caché en una variable de módulo.
+
+---
+
+# Fase 2 — Popup
+
+Requiere `pnpm build` y recargar la extensión (↻) en `chrome://extensions`.
+Para los saldos hace falta Anvil:
+
+```bash
+anvil    # escucha en http://localhost:8545, chainId 31337 (0x7a69)
+```
+
+## 7. Onboarding — crear wallet
+
+Si ya tenías wallet, resetéala antes (comprobación 4 de la Fase 1, o el botón de
+la propia UI).
+
+1. Click en el icono de la extensión. Debe verse "No wallet yet".
+2. **Create a new wallet** → aparecen 12 palabras numeradas, en monoespaciada.
+3. El botón **Create wallet** está deshabilitado. Marca el checkbox → se activa.
+4. Confirma. Aparece la lista de 5 cuentas.
+
+Comprueba que la frase **no** quedó en ningún sitio del lado de la UI. En la
+consola del popup:
+
+```js
+sessionStorage.length   // 0
+localStorage.length     // 0
+```
+
+## 8. Onboarding — importar
+
+Reset, y esta vez **Import an existing wallet**.
+
+1. El contador de palabras reacciona al escribir: con 3 palabras dice
+   "3 words. A recovery phrase has 12, 15, 18, 21 or 24" y el botón está
+   deshabilitado.
+2. Pulsa **Use the public Anvil dev phrase**. El contador pasa a "12 words" en
+   verde y el botón se habilita.
+3. Importa → 5 cuentas.
+
+Prueba también el caso que motiva `normalizeMnemonicInput`: pega la frase con un
+salto de línea al final y espacios dobles en medio. Debe seguir diciendo
+"12 words" e importar sin quejarse.
+
+## 9. Saldos y polling (con Anvil encendido)
+
+- Las 5 cuentas muestran `10000.0000 ETH`.
+- La primera cuenta es la marcada como `default`.
+- El badge de red dice "Anvil Local" con el punto verde.
+
+Para ver el refresco de 5 s, mueve fondos por fuera y espera sin tocar nada:
+
+```bash
+cast send 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --value 1ether --private-key \
+  0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --rpc-url http://localhost:8545
+```
+
+En menos de 5 segundos, y sin interactuar con el popup, la cuenta 0 debe bajar y
+la 1 subir. En la pestaña Network de DevTools se ve una petición cada 5 s.
+
+**Y lo que confirma que el polling vive en el popup:** cierra el popup y mira la
+pestaña Network del service worker. Las peticiones paran. Nadie está mirando el
+saldo, así que no se consulta.
+
+## 10. Red caída (Anvil apagado)
+
+Con el popup abierto, para Anvil (`Ctrl-C`). En menos de 5 s:
+
+- Aparece el banner "Cannot reach Anvil Local. Balances may be out of date."
+- El punto del badge de red se pone rojo.
+- **Las 5 cuentas siguen ahí**, con los últimos saldos buenos.
+- Copiar una dirección sigue funcionando; cambiar la cuenta por defecto también.
+
+Nada de pantalla en blanco y nada de lista vacía: la wallet sin nodo sigue siendo
+una wallet, solo que sin saldos.
+
+Vuelve a arrancar Anvil → el banner desaparece solo en el siguiente ciclo.
+
+## 11. Cuenta por defecto
+
+Click en otra cuenta → la marca `default` se mueve y el borde violeta también.
+
+Comprueba la asimetría del modelo por origen (la mitad que ya existe):
+
+```js
+await chrome.storage.local.get(null)
+```
+
+Solo debe haber cambiado `cc:defaultAccountIndex`. `cc:connectedSites` no se
+toca — la cuenta por defecto es preferencia interna y ninguna dApp se entera.
+
+## 12. Persistencia entre aperturas
+
+Cierra el popup y vuelve a abrirlo. Debe mostrar directamente las cuentas, sin
+pedir la frase y sin pasar por el onboarding.
+
+Repítelo después de que el service worker se duerma (~30 s): el resultado es el
+mismo, porque el estado se relee de storage en cada petición.
