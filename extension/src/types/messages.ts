@@ -668,8 +668,13 @@ export function classifySender(
   runtimeId: string,
 ): SenderContext | null {
   if (sender.id !== runtimeId) return null;
-  const fromPage = sender.tab !== undefined;
   const origin = sender.origin ?? sender.url ?? "unknown";
+  // 🇪🇸 NOTA: `sender.tab` NO basta para distinguir una web de nuestra propia UI.
+  // connect.html y notification.html se abren con chrome.windows.create, así que
+  // también traen `tab`. Lo que las separa es el origin: nuestras páginas
+  // reportan chrome-extension://<runtimeId>, una web reporta su propio dominio.
+  const isOwnExtensionPage = origin === `chrome-extension://${runtimeId}`;
+  const fromPage = sender.tab !== undefined && !isOwnExtensionPage;
   return { fromPage, origin, tabId: sender.tab?.id };
 }
 
