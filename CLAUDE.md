@@ -3,6 +3,29 @@
 Wallet de Ethereum como extensión de Chrome. Práctica del Máster CodeCrypto.
 Proyecto de 11 fases. Sin smart contracts en el alcance.
 
+## Estructura del repo
+
+**Dos proyectos independientes**, cada uno con su `package.json` y su lockfile.
+No hay workspace de pnpm en la raíz, y es deliberado: no comparten código, y
+Vercel necesita instalar solo lo de `dapp/`.
+
+```
+extension/     la wallet — service worker, popup, provider inyectado
+dapp/          dApp Next.js 15 que consume el provider desde fuera
+docs/          DEPLOY.md
+```
+
+**La dApp no importa NADA de `extension/`.** Declara EIP-1193 y EIP-6963 por su
+cuenta en `dapp/src/types/eip1193.ts`, porque son estándares públicos y una dApp
+real no conoce los tipos internos de la wallet. Lo único específico del proyecto
+que sabe es una constante con el rdns. Si algo parece necesitar un import entre
+los dos, para y pregunta: probablemente signifique que la separación se está
+rompiendo.
+
+`formatEther` y `shortenAddress` existen a los dos lados a propósito. Son
+veinticinco líneas puras con su test en cada proyecto; montar un paquete
+compartido para eso cuesta más que duplicarlas.
+
 ## Regla inmutable
 
 `extension/src/types/messages.ts` es el contrato de mensajería del proyecto
@@ -22,11 +45,20 @@ Modelo de cuenta: **por origen**. Cada dApp conectada tiene su propia cuenta.
 
 ## Stack fijado
 
+**`extension/`**
+
 - Vite 7.3.6 (Rollup, `build.rollupOptions`) · React 19 · TypeScript 5.9.3 strict
 - pnpm · ethers.js v6 (solo en `background.ts`)
 - Prohibido: viem, web3.js, @scure/bip39, @noble/* directo
 - Prohibido: `fetch`/`axios` para RPC (todo vía `ethers.JsonRpcProvider`)
 - Prohibido: cargar ethers desde CDN (viola la CSP de MV3)
+
+**`dapp/`**
+
+- Next.js 15 App Router · React 19 · TypeScript 5.9.3 strict
+- CSS plano con custom properties, misma paleta que la extensión. Sin Tailwind.
+- **Sin ethers** hasta que la Fase 7 necesite `verifyTypedData` de verdad
+- El descubrimiento es solo por EIP-6963. Nunca `window.codecrypto` directo.
 
 ## Build — no tocar sin discutirlo
 
