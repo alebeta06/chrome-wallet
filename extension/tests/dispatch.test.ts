@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ErrorCode, type RpcRequestMessage, type RpcResponseMessage, type WalletSnapshot } from "@/types/messages";
+import {
+  ErrorCode,
+  MAX_LOG_ENTRIES,
+  type LogEntry,
+  type RpcRequestMessage,
+  type RpcResponseMessage,
+  type WalletSnapshot,
+} from "@/types/messages";
 import { createDispatcher } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
 import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID, defaultNetworks } from "@/lib/networks";
 import { ProviderError } from "@/lib/errors";
-import type { BalanceReader } from "@/lib/chain";
-import { createMemoryStorageArea } from "./helpers/memory-storage-area";
+import type { BalanceAtReader, BalanceReader } from "@/lib/chain";
+import { createMemoryStorageArea, type MemoryStorageArea } from "./helpers/memory-storage-area";
 
 const RUNTIME_ID = "codecryptowalletextensionidaaaa";
 const ANVIL_PHRASE = "test test test test test test test test test test test junk";
@@ -59,7 +66,11 @@ function request(method: string, params: unknown[] = []): RpcRequestMessage {
   return { type: "CODECRYPTO_RPC", id: "req-1", method, params };
 }
 
-function setup(seed: Record<string, unknown> = {}, fetchBalances?: BalanceReader) {
+function setup(
+  seed: Record<string, unknown> = {},
+  fetchBalances?: BalanceReader,
+  fetchBalanceAt?: BalanceAtReader,
+) {
   const area = createMemoryStorageArea(seed);
 
   /**
@@ -83,8 +94,14 @@ function setup(seed: Record<string, unknown> = {}, fetchBalances?: BalanceReader
     dispatch: createDispatcher({
       storage: createWalletStorage(observedArea),
       ...(fetchBalances === undefined ? {} : { fetchBalances }),
+      ...(fetchBalanceAt === undefined ? {} : { fetchBalanceAt }),
     }),
   };
+}
+
+/** The activity log as it currently stands in storage. */
+function logsIn(area: MemoryStorageArea): LogEntry[] {
+  return (area.snapshot()["cc:logs"] as LogEntry[] | undefined) ?? [];
 }
 
 function expectError(response: RpcResponseMessage, code: number): void {
@@ -117,7 +134,17 @@ describe("the trust boundary", () => {
     );
 
     expectError(response, ErrorCode.UNAUTHORIZED);
-    expect(area.keys()).toEqual([]);
+
+    /**
+     * 🇪🇸 NOTA: desde la Fase 3 este intento SÍ deja rastro — un intento de una
+     * web de llamar a un método interno es exactamente lo que un registro de
+     * actividad tiene que recoger. Lo que no puede pasar es que la frase que
+     * venía en los params acabe escrita: por eso la aserción no es "no se
+     * escribió nada" sino "no se escribió nada de la wallet, y lo que sí se
+     * escribió no lleva el mnemonic dentro".
+     */
+    expect(area.keys()).toEqual(["cc:logs"]);
+    expect(JSON.stringify(area.snapshot())).not.toContain("junk");
   });
 
   it.each([
@@ -141,11 +168,22 @@ describe("the trust boundary", () => {
     expectError(await dispatch(request("wallet_getState"), foreign, RUNTIME_ID), ErrorCode.UNAUTHORIZED);
   });
 
+  /**
+   * 🇪🇸 NOTA: este test usaba `eth_accounts`, que en la Fase 3 ya está
+   * implementado. Se cambia a `eth_requestAccounts` —que llega en la Fase 5—
+   * porque lo que comprueba no es el método concreto: es que la puerta y la
+   * implementación son dos cosas distintas. Un método público sin implementar
+   * tiene que dar 4200 (pasó el control de emisor y cayó por el `default`), no
+   * 4100. Si algún día diera 4100, sería que la frontera está rechazando
+   * métodos públicos y ninguna dApp podría hablar con la wallet.
+   */
   it("lets a public method through the gate (it just is not implemented yet)", async () => {
     const { dispatch } = setup();
 
-    // 4200, not 4100: the sender check passed and the switch fell through.
-    expectError(await dispatch(request("eth_accounts"), pageSender(), RUNTIME_ID), ErrorCode.UNSUPPORTED_METHOD);
+    expectError(
+      await dispatch(request("eth_requestAccounts"), pageSender(), RUNTIME_ID),
+      ErrorCode.UNSUPPORTED_METHOD,
+    );
   });
 
   it("answers an unknown method with 4200", async () => {
@@ -695,5 +733,340 @@ describe("the default network catalogue", () => {
     first[0].name = "tampered";
 
     expect(defaultNetworks()[0].name).toBe("Anvil Local");
+  });
+});
+
+// ============================================================================
+// Phase 3 — the public surface a dApp can reach without any permission
+// ============================================================================
+
+describe("eth_chainId", () => {
+  it("answers a web page with the stored chain id", async () => {
+    const { dispatch } = setup({ ...LOADED_WALLET, "cc:chainId": SEPOLIA_CHAIN_ID });
+
+    const chainId = expectResult<string>(
+      await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID),
+    );
+
+    expect(chainId).toBe(SEPOLIA_CHAIN_ID);
+  });
+
+  it("falls back to Anvil when nothing is stored", async () => {
+    const { dispatch } = setup();
+
+    expect(expectResult<string>(await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID))).toBe(
+      ANVIL_CHAIN_ID,
+    );
+  });
+
+  /** No wallet needed: the network is a wallet-wide setting, not an account one. */
+  it("works before any wallet exists", async () => {
+    const { dispatch } = setup();
+
+    expect((await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID)).ok).toBe(true);
+  });
+});
+
+describe("eth_accounts", () => {
+  /**
+   * 🇪🇸 NOTA: éste es el ítem de la rúbrica. La wallet está CARGADA, con dos
+   * cuentas en storage, y la respuesta sigue siendo `[]` porque el origen no
+   * está conectado (en la Fase 3 no hay ningún origen conectado). Devolver la
+   * cuenta activa convertiría la wallet en un fingerprint: cualquier web sabría
+   * tu dirección sin pedir permiso ni abrir una ventana.
+   */
+  it("returns [] even with a loaded wallet", async () => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    const accounts = expectResult<string[]>(
+      await dispatch(request("eth_accounts"), pageSender(), RUNTIME_ID),
+    );
+
+    expect(accounts).toEqual([]);
+  });
+
+  it("returns [] for every origin, not just one", async () => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    for (const origin of ["https://a.example", "https://b.example", "http://localhost:8080"]) {
+      const accounts = expectResult<string[]>(
+        await dispatch(request("eth_accounts"), pageSender(origin), RUNTIME_ID),
+      );
+      expect(accounts).toEqual([]);
+    }
+  });
+
+  /**
+   * The structural version of the assertion above, in the same spirit as the
+   * `wallet_setDefaultAccount` test further up.
+   *
+   * 🇪🇸 NOTA: comprobar que la respuesta es `[]` no impide que mañana alguien
+   * escriba `return accounts.slice(0, 1)` "solo para que la dApp de pruebas
+   * funcione". Comprobar que el handler NO LEE las cuentas sí: sin esa lectura,
+   * filtrar una dirección desde aquí es imposible de escribir sin que el test se
+   * entere. Es la misma técnica y por el mismo motivo.
+   */
+  it("never even reads the accounts", async () => {
+    const { readKeys, dispatch } = setup(LOADED_WALLET);
+
+    await dispatch(request("eth_accounts"), pageSender(), RUNTIME_ID);
+
+    expect(readKeys).not.toContain("cc:accounts");
+    expect(readKeys).not.toContain("cc:mnemonic");
+  });
+
+  it("does not leak the mnemonic through the response", async () => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    const response = await dispatch(request("eth_accounts"), pageSender(), RUNTIME_ID);
+
+    expect(JSON.stringify(response)).not.toContain("junk");
+  });
+});
+
+describe("eth_getBalance", () => {
+  const AT_LATEST = "0x8ac7230489e80000";
+
+  function balanceSetup(seed: Record<string, unknown> = LOADED_WALLET) {
+    const reader = vi.fn<BalanceAtReader>(async () => AT_LATEST as `0x${string}`);
+    return { reader, ...setup(seed, undefined, reader) };
+  }
+
+  it("reads the address on the active network and returns what the node says", async () => {
+    const { reader, dispatch } = balanceSetup();
+
+    const balance = expectResult<string>(
+      await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID),
+    );
+
+    expect(balance).toBe(AT_LATEST);
+    expect(reader).toHaveBeenCalledTimes(1);
+    expect(reader.mock.calls[0][0].chainId).toBe(ANVIL_CHAIN_ID);
+    expect(reader.mock.calls[0][1]).toBe(ANVIL_FIRST);
+  });
+
+  it("defaults the block tag to latest", async () => {
+    const { reader, dispatch } = balanceSetup();
+
+    await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID);
+
+    expect(reader.mock.calls[0][2]).toBe("latest");
+  });
+
+  it.each(["latest", "pending", "earliest", "0x1", "0xA4B1"])(
+    "passes the %s block tag through",
+    async (blockTag) => {
+      const { reader, dispatch } = balanceSetup();
+
+      await dispatch(request("eth_getBalance", [ANVIL_FIRST, blockTag]), pageSender(), RUNTIME_ID);
+
+      expect(reader.mock.calls[0][2]).toBe(blockTag);
+    },
+  );
+
+  /** Some dApps send an explicit null instead of omitting the argument. */
+  it("treats a null block tag as latest", async () => {
+    const { reader, dispatch } = balanceSetup();
+
+    await dispatch(request("eth_getBalance", [ANVIL_FIRST, null]), pageSender(), RUNTIME_ID);
+
+    expect(reader.mock.calls[0][2]).toBe("latest");
+  });
+
+  it("follows cc:chainId to a different network", async () => {
+    const { reader, dispatch } = balanceSetup({ ...LOADED_WALLET, "cc:chainId": SEPOLIA_CHAIN_ID });
+
+    await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID);
+
+    expect(reader.mock.calls[0][0].rpcUrl).toBe("https://sepolia.drpc.org");
+  });
+
+  /**
+   * 🇪🇸 NOTA: `eth_getBalance` es público, así que sus params son entrada
+   * hostil. Lo que se afirma aquí no es solo el -32602: es que el lector NUNCA
+   * se llamó. Validar después de abrir la conexión sería validar tarde.
+   */
+  it.each([
+    ["no parameters", [] as unknown[]],
+    ["a non-hex address", ["0xnothex"]],
+    ["an address of the wrong length", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb922"]],
+    ["a numeric address", [42]],
+    ["an invented block tag", [ANVIL_FIRST, "yesterday"]],
+    ["a numeric block tag", [ANVIL_FIRST, 12]],
+    ["a hex block tag with no digits", [ANVIL_FIRST, "0x"]],
+  ])("rejects %s with -32602 and never reaches the network", async (_label, params) => {
+    const { reader, dispatch } = balanceSetup();
+
+    expectError(
+      await dispatch(request("eth_getBalance", params), pageSender(), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+    expect(reader).not.toHaveBeenCalled();
+  });
+
+  it("answers 4902 when cc:chainId is not in the catalogue", async () => {
+    const { reader, dispatch } = balanceSetup({ ...LOADED_WALLET, "cc:chainId": "0xdead" });
+
+    expectError(
+      await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID),
+      ErrorCode.UNRECOGNIZED_CHAIN,
+    );
+    expect(reader).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an unreachable node as 4901", async () => {
+    const reader = vi.fn<BalanceAtReader>(async () => {
+      throw new ProviderError({
+        code: ErrorCode.CHAIN_DISCONNECTED,
+        message: "Cannot reach the RPC endpoint for Anvil Local.",
+      });
+    });
+    const { dispatch } = setup(LOADED_WALLET, undefined, reader);
+
+    expectError(
+      await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID),
+      ErrorCode.CHAIN_DISCONNECTED,
+    );
+  });
+
+  /** No wallet loaded: the balance of an arbitrary address is public chain data. */
+  it("works before any wallet exists", async () => {
+    const { dispatch } = balanceSetup({});
+
+    expect(
+      (await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID)).ok,
+    ).toBe(true);
+  });
+});
+
+// ============================================================================
+// Phase 3 — the activity log (specs 13-16)
+// ============================================================================
+
+describe("the activity log", () => {
+  it("records a call from a web page, with its origin", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+
+    await dispatch(request("eth_chainId"), pageSender("https://dapp.example"), RUNTIME_ID);
+
+    const entries = logsIn(area);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].level).toBe("call");
+    expect(entries[0].label).toBe("eth_chainId");
+    expect(entries[0].origin).toBe("https://dapp.example");
+  });
+
+  /**
+   * 🇪🇸 NOTA: el popup consulta saldos cada 5 s. Con MAX_LOG_ENTRIES = 500 —y
+   * ese número vive en el contrato inmutable— eso barre el registro entero en
+   * cuarenta minutos y entierra toda la actividad real de dApps, que es
+   * justamente lo que las specs 13-16 quieren ver.
+   */
+  it("records nothing when the extension's own UI calls", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+
+    await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID);
+    await dispatch(request("wallet_setDefaultAccount", [{ accountIndex: 1 }]), uiSender(), RUNTIME_ID);
+
+    expect(logsIn(area)).toEqual([]);
+  });
+
+  it("records the call and then the error when a call fails", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET);
+
+    await dispatch(request("eth_requestAccounts"), pageSender(), RUNTIME_ID);
+
+    const entries = logsIn(area);
+    expect(entries.map((entry) => entry.level)).toEqual(["call", "error"]);
+    expect(entries[1].detail).toMatchObject({ code: ErrorCode.UNSUPPORTED_METHOD });
+  });
+
+  it("keeps the params of a harmless public call", async () => {
+    const { area, dispatch } = setup(LOADED_WALLET, undefined, vi.fn<BalanceAtReader>(async () => "0x0"));
+
+    await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID);
+
+    expect(logsIn(area)[0].detail).toEqual([ANVIL_FIRST]);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE RULE ESTABLISHED BEFORE THERE IS ANYTHING TO BREAK
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: en la Fase 3 no existe la firma, así que este test no protege
+   * ningún secreto todavía. Ése es el motivo de escribirlo hoy: cuando la Fase 6
+   * implemente `eth_sendTransaction` y `eth_signTypedData_v4`, el test ya está
+   * puesto y nadie tiene que acordarse de la regla. Un registro es el sitio más
+   * fácil del mundo para filtrar algo, porque se escribe una vez y se lee seis
+   * meses después.
+   */
+  it.each(["eth_sendTransaction", "eth_signTypedData_v4"])(
+    "never writes the params of %s",
+    async (method) => {
+      const { area, dispatch } = setup(LOADED_WALLET);
+
+      await dispatch(
+        request(method, [{ from: ANVIL_FIRST, to: ANVIL_SECOND, value: "0xdeadbeef" }]),
+        pageSender(),
+        RUNTIME_ID,
+      );
+
+      expect(logsIn(area)[0].detail).toBe("[redacted]");
+      expect(JSON.stringify(logsIn(area))).not.toContain("0xdeadbeef");
+    },
+  );
+
+  it("never writes the params of an internal method a page tried to call", async () => {
+    const { area, dispatch } = setup();
+
+    await dispatch(
+      request("wallet_importMnemonic", [{ phrase: ANVIL_PHRASE, accountCount: 5 }]),
+      pageSender(),
+      RUNTIME_ID,
+    );
+
+    expect(logsIn(area)[0].detail).toBe("[redacted]");
+    expect(JSON.stringify(logsIn(area))).not.toContain("junk");
+  });
+
+  it("keeps at most MAX_LOG_ENTRIES, dropping the oldest", async () => {
+    const seeded: LogEntry[] = Array.from({ length: MAX_LOG_ENTRIES }, (_unused, index) => ({
+      id: `seed-${index}`,
+      ts: index,
+      level: "call",
+      label: `seeded-${index}`,
+    }));
+    const { area, dispatch } = setup({ ...LOADED_WALLET, "cc:logs": seeded });
+
+    await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID);
+
+    const entries = logsIn(area);
+    expect(entries).toHaveLength(MAX_LOG_ENTRIES);
+    // The oldest is gone and the newest is ours.
+    expect(entries[0].label).toBe("seeded-1");
+    expect(entries[MAX_LOG_ENTRIES - 1].label).toBe("eth_chainId");
+  });
+
+  /**
+   * A broken log must never turn a good call into an error for the dApp.
+   */
+  it("answers the dApp even if the log cannot be written", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const dispatch = createDispatcher({
+      storage: {
+        // Only the log read explodes; everything else behaves like an empty wallet.
+        get: (key: string) =>
+          key === "cc:logs" ? Promise.reject(new Error("log exploded")) : Promise.resolve(undefined),
+        set: () => Promise.resolve(),
+        setMany: () => Promise.resolve(),
+        remove: () => Promise.resolve(),
+        resetWallet: () => Promise.resolve(),
+      },
+    });
+
+    const response = await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID);
+
+    expect(response.ok).toBe(true);
   });
 });
