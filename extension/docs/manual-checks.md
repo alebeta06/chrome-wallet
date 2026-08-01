@@ -227,31 +227,33 @@ mismo, porque el estado se relee de storage en cada petición.
 # Fase 3 — Provider inyectado y EIP-6963
 
 Requiere `pnpm build` y recargar la extensión (↻) en `chrome://extensions`.
-Además hacen falta Anvil y un servidor estático:
+Además hacen falta Anvil y la dApp:
 
 ```bash
-anvil                                          # http://localhost:8545, chainId 31337
+anvil                       # http://localhost:8545, chainId 31337
 
-# desde la raíz del repo, en otra terminal:
-python3 -m http.server 8080 --directory extension
-#   → http://localhost:8080/test.html
+# en otra terminal:
+cd dapp && pnpm dev         # → http://localhost:3000
 ```
 
 > 🇪🇸 NOTA: **por HTTP, nunca por `file://`.** Con `file://` el origin es `null`,
 > un origen opaco. En la Fase 5 los permisos se guardan POR ORIGEN, así que
 > probar contra un origen opaco daría por buenas cosas que no lo son.
 
-`extension/test.html` es **desechable**: la dApp de verdad es el Next.js de la
-Fase 4 y esta página se borra entonces.
+Estas comprobaciones se hacían contra `extension/test.html`, una página estática
+que se borró en la Fase 4. Ahora se hacen contra la dApp, y **todas valen igual
+en `localhost:3000` que en la URL de Vercel** — de hecho conviene pasarlas por
+las dos, porque son dos orígenes distintos y en la Fase 5 eso empieza a importar.
+
+`__URL_DE_VERCEL__` ← anota aquí la tuya cuando despliegues
+([`docs/DEPLOY.md`](../../docs/DEPLOY.md)).
 
 ## 13. El content script llega hasta la página (empieza por aquí)
 
-Que `test.html` no acabe en `dist/` es correcto y es irrelevante para esto: lo
-que importa es que la página, servida desde `localhost:8080`, cae dentro de
-`<all_urls>` y recibe el content script. Si esto falla, todo lo demás de la lista
-es ruido.
+Lo que importa es que la página cae dentro de `<all_urls>` y recibe el content
+script. Si esto falla, todo lo demás de la lista es ruido.
 
-Abre `http://localhost:8080/test.html` y en **su** consola:
+Abre `http://localhost:3000` y en **su** consola:
 
 ```js
 window.codecrypto        // objeto, no undefined
@@ -259,36 +261,47 @@ window.codecrypto.isCodeCrypto   // true
 window.codecrypto.isMetaMask     // false
 ```
 
-Y arriba del todo del log de la consola tiene que estar:
+Y en el log de la consola tiene que estar:
 
 ```
-[codecrypto] content script loaded at http://localhost:8080
+[codecrypto] content script loaded at http://localhost:3000
 ```
 
 > `isMetaMask: false` es deliberado. Mentir ahí rompe las dApps que ramifican
 > por ese flag, y es deshonesto.
 
+> 🇪🇸 NOTA: que la dApp lea `window.codecrypto` desde la consola es una
+> comprobación de diagnóstico, no lo que hace la página. **La dApp descubre la
+> wallet solo por EIP-6963** — leer el global directamente es justo lo que
+> EIP-6963 existe para evitar.
+
 ## 14. La wallet aparece por EIP-6963, con su icono
 
-En la sección 1 de la página, la tarjeta **CodeCrypto Wallet** con:
+En la sección 1 de la dApp, la tarjeta **CodeCrypto Wallet** con:
 
 - El **icono renderizado**, no un cuadro roto. Es la comprobación real de que el
   data URI es un SVG válido: los selectores multi-wallet lo meten en un `<img>`.
 - `academy.codecrypto.wallet` como rdns.
-- Un uuid con forma de UUIDv4.
+- La etiqueta *this project*.
+- En la sección 2, un uuid con forma de UUIDv4.
 
-Pulsa **Re-dispatch eip6963:requestProvider**: la tarjeta sigue ahí y no se
-duplica. Eso comprueba el segundo de los dos anuncios — el que atiende a las
-dApps que montan su selector más tarde.
+Pulsa **Re-dispatch eip6963:requestProvider**: la tarjeta sigue ahí y **no se
+duplica**, y el contador sigue diciendo el mismo número. Eso comprueba dos cosas
+a la vez — el segundo de los dos anuncios (el que atiende a las dApps que montan
+su selector más tarde) y la deduplicación del store.
 
 ## 15. Los métodos públicos
 
 | Botón | Esperado |
 |---|---|
-| `eth_chainId` | `"0x7a69"` (Anvil) |
+| `eth_chainId` | `Anvil Local · 31337 · 0x7a69` — nombre legible, no solo el hex |
 | `eth_accounts` | `[]` — **array vacío, con la wallet cargada y con cuentas** |
-| `eth_getBalance` sobre `0xf39Fd…92266` | el saldo real de Anvil en hex |
-| `eth_getBalance with junk` | error **-32602**, y Anvil no recibe ninguna petición |
+| `eth_getBalance` sobre `0xf39Fd…92266` | `10000.0000 ETH` con Anvil recién arrancado |
+| Escribir una dirección malformada | El botón se deshabilita y la dApp lo explica, **sin llegar a preguntarle a la wallet** |
+
+Con Anvil apagado, `eth_getBalance` tiene que dar **4901** con el texto "cannot
+reach that network's RPC endpoint" — no un `-32603` genérico ni un JSON crudo.
+Es la prueba de que el mapa de errores de la dApp hace su trabajo.
 
 > 🇪🇸 NOTA: el `[]` de `eth_accounts` es el ítem de la rúbrica, no un "todavía no
 > está implementado". Devolver la cuenta activa a un origen no conectado
@@ -307,20 +320,25 @@ Fase 5.
 
 ## 17. El provider existe dentro de un iframe (spec 34)
 
-La sección 4 embebe la propia página con `?frame=1`. Tiene que decir en verde:
+La sección 5 de la dApp embebe la ruta `/frame`. Tiene que decir en verde:
 
 ```
-iframe: provider present ✓ (CodeCrypto Wallet)
+Provider present inside this iframe ✓ — CodeCrypto Wallet
 ```
 
 Es lo que cubren `all_frames: true` y `match_about_blank: true` del manifest: hay
 dApps que viven dentro de un iframe, y una wallet que solo se inyecta en el frame
 principal no existe para ellas.
 
+> 🇪🇸 NOTA: el mensaje de "no provider" solo aparece tras 800 ms de espera. La
+> ausencia de un anuncio no es un evento —nadie dispara "no estoy aquí"— así que
+> sin ese temporizador la página se quedaría en "checking…" para siempre justo en
+> el caso que hay que poder distinguir.
+
 ## 18. El uuid es estable entre recargas
 
-Apunta el uuid de la tarjeta. Recarga la página **dos veces** (F5). Tiene que ser
-**el mismo** las tres veces.
+Apunta el uuid de la sección 2. Recarga la página **dos veces** (F5). Tiene que
+ser **el mismo** las tres veces.
 
 ```js
 await chrome.storage.local.get('cc:providerUuid')   // en la consola de la extensión
@@ -334,15 +352,22 @@ await chrome.storage.local.get('cc:providerUuid')   // en la consola de la exten
 
 ## 19. Convivencia con MetaMask
 
-Con MetaMask instalado y habilitado, recarga `test.html`:
+Con MetaMask (u otras wallets) instaladas y habilitadas, recarga la dApp:
 
-- La sección 1 lista **las dos** wallets, cada una con su icono y su rdns.
-- El contador dice "2 wallet(s) announced".
+- La sección 1 lista **todas** las wallets, cada una con su icono y su rdns.
+- El contador dice cuántas anunciaron.
+- Solo CodeCrypto lleva la etiqueta *this project*.
+- Se puede pulsar cualquiera y los métodos de la sección 3 van contra ella.
 - **Cero errores de `window.ethereum` en la consola.**
 
 Lo último es consecuencia de una decisión: `inject.ts` no toca `window.ethereum`
 en absoluto. Pelearse por esa propiedad es como las wallets se rompen entre
 ellas, y el que pierde siempre es el usuario delante de una dApp que no conecta.
+
+> 🇪🇸 NOTA: probar con otra wallet seleccionada no es un extra. Que
+> `eth_chainId` funcione contra MetaMask demuestra que la dApp está escrita
+> contra EIP-1193 y no contra las particularidades de esta wallet — que es la
+> razón de que `dapp/` no importe nada de `extension/`.
 
 ## 20. El relay de eventos y el cerrojo del origen
 
@@ -354,7 +379,7 @@ En `chrome://extensions` → tarjeta de la extensión → **service worker**, en
 consola:
 
 ```js
-const [tab] = await chrome.tabs.query({ url: 'http://localhost:8080/*' })
+const [tab] = await chrome.tabs.query({ url: 'http://localhost:3000/*' })
 
 // (a) evento GLOBAL: expectedOrigin null, va a cualquier origen conectado
 await chrome.tabs.sendMessage(tab.id, {
@@ -366,7 +391,7 @@ await chrome.tabs.sendMessage(tab.id, {
 await chrome.tabs.sendMessage(tab.id, {
   type: 'CODECRYPTO_TAB_EVENT', eventName: 'accountsChanged',
   data: ['0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'],
-  expectedOrigin: 'http://localhost:8080',
+  expectedOrigin: 'http://localhost:3000',
 })
 
 // (c) el mismo, con el origen EQUIVOCADO
@@ -388,8 +413,8 @@ no llega**.
 
 ## 21. El registro de actividad (base de las specs 13-16)
 
-Después de haber pulsado unos cuantos botones en `test.html`, en la consola de
-una página de la extensión:
+Después de haber pulsado unos cuantos botones en la dApp, en la consola de una
+página de la extensión:
 
 ```js
 (await chrome.storage.local.get('cc:logs'))['cc:logs']
@@ -397,9 +422,12 @@ una página de la extensión:
 
 Esperado:
 
-- Una entrada `call` por cada llamada, con `origin: 'http://localhost:8080'`.
+- Una entrada `call` por cada llamada, con `origin: 'http://localhost:3000'`.
 - Una entrada `error` extra detrás de cada llamada que falló (el 4200 de
-  `eth_requestAccounts`, el -32602 de los params malos).
+  `eth_requestAccounts`, el 4901 con Anvil apagado).
+- Si has probado también contra la URL de Vercel, sus entradas llevan **ese**
+  origin y no el de localhost — que es la primera señal visible de que el modelo
+  por origen de la Fase 5 tiene con qué trabajar.
 - **Ninguna entrada del polling de saldos del popup.** Abre el popup, déjalo
   medio minuto, ciérralo y vuelve a mirar: el registro no ha crecido.
 
