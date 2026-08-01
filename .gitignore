@@ -11,3 +11,10 @@ coverage/
 playwright-report/
 test-results/
 anvil-state.json
+
+# dapp/ — Next.js
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+.vercel/

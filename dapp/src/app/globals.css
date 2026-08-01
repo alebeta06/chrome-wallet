@@ -1,0 +1,424 @@
+/*
+ * Stylesheet for the test dApp.
+ *
+ * Plain CSS with custom properties, no Tailwind — the same choice the extension
+ * makes, and here for a second reason on top of that one: the palette is shared
+ * with extension/src/ui/styles.css so the page and the wallet popup read as one
+ * product in the demo. The SPACING scale is NOT shared: the extension's is sized
+ * for a 360px popup and this is a full page.
+ *
+ * 🇪🇸 NOTA: Tailwind v4 traería además @tailwindcss/oxide, un binario nativo con
+ * postinstall, en un despliegue donde pnpm 11 los bloquea por defecto. Ya hubo
+ * que autorizar el de sharp para que `pnpm install` no saliera con código 1
+ * (ver pnpm-workspace.yaml). Una pieza móvil menos en el build de Vercel.
+ */
+
+:root {
+  /* --- Shared with the extension, deliberately identical --- */
+  --bg: #0f1115;
+  --surface: #181b22;
+  --surface-hover: #1f232c;
+  --border: #272c37;
+  --text: #e6e8ee;
+  --text-muted: #8b93a7;
+  --accent: #7c5cff;
+  --accent-text: #ffffff;
+  --error: #ff6b6b;
+  --success: #4ade80;
+  --warning: #fbbf24;
+
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* --- This surface's own scale: a page, not a 360px popup --- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+/* --------------------------------------------------------------------------
+   Layout
+   -------------------------------------------------------------------------- */
+
+.page {
+  max-width: 940px;
+  margin: 0 auto;
+  padding: var(--space-12) var(--space-6) var(--space-12);
+}
+
+.page-header {
+  margin-bottom: var(--space-8);
+}
+
+.page-title {
+  font-size: 28px;
+  line-height: 1.2;
+  margin: 0 0 var(--space-2);
+  letter-spacing: -0.02em;
+}
+
+.page-lede {
+  color: var(--text-muted);
+  margin: 0;
+  max-width: 62ch;
+}
+
+.section {
+  margin-top: var(--space-8);
+}
+
+.section-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin: 0 0 var(--space-3);
+  font-weight: 600;
+}
+
+.section-note {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 var(--space-3);
+  max-width: 70ch;
+}
+
+.grid {
+  display: grid;
+  gap: var(--space-3);
+}
+
+@media (min-width: 720px) {
+  .grid-2 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Cards
+   -------------------------------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.wallet-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.wallet-card:hover {
+  background: var(--surface-hover);
+}
+
+.wallet-card[aria-pressed="true"] {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.wallet-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  flex: none;
+  background: var(--bg);
+}
+
+.wallet-meta {
+  min-width: 0;
+}
+
+.wallet-name {
+  font-weight: 600;
+}
+
+.wallet-rdns,
+.wallet-uuid {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+
+/* --------------------------------------------------------------------------
+   Controls
+   -------------------------------------------------------------------------- */
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+button.action {
+  font: inherit;
+  font-size: 14px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+button.action:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+button.action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.action.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+input.field {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  flex: 1 1 380px;
+  min-width: 0;
+}
+
+input.field:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input.field[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+/* --------------------------------------------------------------------------
+   Output
+   -------------------------------------------------------------------------- */
+
+.output {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin: var(--space-3) 0 0;
+  min-height: 88px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.output-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  display: block;
+  margin-bottom: var(--space-1);
+}
+
+.output-value {
+  font-size: 15px;
+}
+
+.ok {
+  color: var(--success);
+}
+.bad {
+  color: var(--error);
+}
+.muted {
+  color: var(--text-muted);
+}
+
+.error-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Empty state
+   -------------------------------------------------------------------------- */
+
+.empty {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-8);
+  text-align: center;
+}
+
+.empty h2 {
+  margin: 0 0 var(--space-2);
+  font-size: 18px;
+}
+
+.empty p {
+  color: var(--text-muted);
+  margin: 0 auto var(--space-4);
+  max-width: 52ch;
+}
+
+.empty ol {
+  text-align: left;
+  max-width: 52ch;
+  margin: 0 auto var(--space-4);
+  color: var(--text-muted);
+  padding-left: 1.2em;
+}
+
+.empty li {
+  margin-bottom: var(--space-1);
+}
+
+/* --------------------------------------------------------------------------
+   Callout — used for the eth_accounts explanation
+   -------------------------------------------------------------------------- */
+
+.callout {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: var(--space-3) var(--space-4);
+  margin-top: var(--space-3);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.callout strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Event log
+   -------------------------------------------------------------------------- */
+
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.event-list li {
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: var(--space-3);
+}
+
+.event-list li:last-child {
+  border-bottom: none;
+}
+
+.event-time {
+  color: var(--text-muted);
+  flex: none;
+}
+
+.event-name {
+  color: var(--accent);
+  flex: none;
+}
+
+.event-data {
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------
+   Frame injection probe
+   -------------------------------------------------------------------------- */
+
+.frame-embed {
+  width: 100%;
+  height: 84px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.frame-probe {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}

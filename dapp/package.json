@@ -1,0 +1,30 @@
+{
+  "name": "@codecrypto/wallet-dapp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Test dApp for the CodeCrypto Wallet extension — EIP-6963 discovery and the public provider surface",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "pnpm typecheck && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "next": "^15.5.22",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

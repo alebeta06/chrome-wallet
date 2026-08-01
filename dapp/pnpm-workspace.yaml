@@ -1,0 +1,13 @@
+# pnpm 11 reads its settings from here, no longer from the "pnpm" field in
+# package.json. There is no `packages:` key on purpose: this is a single
+# package, not a monorepo root. The extension has its own copy of this file for
+# the same reason — the two projects are deliberately independent, with a
+# lockfile each, so that Vercel installs only what dapp/ needs.
+#
+# 🇪🇸 NOTA: pnpm bloquea por defecto los scripts postinstall de las dependencias
+# (buena práctica de supply chain). `sharp` entra como dependencia OPCIONAL de
+# Next —la usa para optimizar imágenes— y trae binarios nativos que necesitan su
+# postinstall. Sin esta autorización `pnpm install` termina con código 1, y eso
+# no es un aviso cosmético: es el build de Vercel roto antes de compilar nada.
+allowBuilds:
+  sharp: true
