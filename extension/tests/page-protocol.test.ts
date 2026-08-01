@@ -264,3 +264,31 @@ describe("notifyListeners", () => {
     expect(() => notifyListeners([], "0x7a69")).not.toThrow();
   });
 });
+
+/**
+ * ============================================================================
+ * THE ONE STRING THE dApp KNOWS ABOUT THIS WALLET
+ * ============================================================================
+ * 🇪🇸 NOTA: `dapp/` no importa NADA de aquí — declara EIP-1193 y EIP-6963 por su
+ * cuenta, porque son estándares públicos y una dApp real no conoce los tipos
+ * internos de una wallet. La única excepción es el rdns, que la dApp lleva como
+ * constante suelta (`CODECRYPTO_RDNS`) para destacar esta wallet en su selector,
+ * igual que cualquier dApp escribe "io.metamask".
+ *
+ * El precio de esa independencia es que nada obliga a los dos valores a
+ * coincidir. Este test es el contrapeso: cambiar el rdns deja de ser un
+ * descuido de una línea y pasa a ser un acto deliberado que rompe un test y
+ * recuerda que hay un segundo sitio que actualizar.
+ *
+ * No se puede hacer al revés (un test en la dApp que importe de la extensión)
+ * sin crear justo el acoplamiento que se está evitando.
+ */
+describe("the public identity", () => {
+  it("pins the rdns that dapp/src/types/eip1193.ts also hardcodes", () => {
+    expect(PROVIDER_RDNS).toBe("academy.codecrypto.wallet");
+  });
+
+  it("pins the display name", () => {
+    expect(PROVIDER_NAME).toBe("CodeCrypto Wallet");
+  });
+});
