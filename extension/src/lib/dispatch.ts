@@ -23,16 +23,24 @@ import {
   assertSenderMayCall,
   classifySender,
   type Address,
+  type BlockTag,
   type Hex,
   type NetworkConfig,
   type RpcRequestMessage,
   type RpcResponseMessage,
+  type SenderContext,
   type WalletSnapshot,
 } from "@/types/messages";
 
-import { fetchBalances as defaultFetchBalances, type BalanceReader } from "./chain";
+import {
+  fetchBalanceAt as defaultFetchBalanceAt,
+  fetchBalances as defaultFetchBalances,
+  type BalanceAtReader,
+  type BalanceReader,
+} from "./chain";
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
+import { appendLog, createLogEntry, redactParams } from "./logs";
 import { DEFAULT_CHAIN_ID, defaultNetworks } from "./networks";
 import type { WalletStorage } from "./storage";
 
@@ -43,12 +51,14 @@ export interface DispatcherDeps {
    * same reason StorageArea is injected.
    */
   fetchBalances?: BalanceReader;
+  fetchBalanceAt?: BalanceAtReader;
 }
 
 /** Everything the handlers are allowed to reach. Nothing is a module global. */
 interface HandlerContext {
   storage: WalletStorage;
   fetchBalances: BalanceReader;
+  fetchBalanceAt: BalanceAtReader;
 }
 
 export type Dispatcher = (
@@ -65,8 +75,9 @@ export type Dispatcher = (
 export function createDispatcher({
   storage,
   fetchBalances = defaultFetchBalances,
+  fetchBalanceAt = defaultFetchBalanceAt,
 }: DispatcherDeps): Dispatcher {
-  const deps: HandlerContext = { storage, fetchBalances };
+  const deps: HandlerContext = { storage, fetchBalances, fetchBalanceAt };
 
   return async function dispatch(message, sender, runtimeId) {
     // 1. Who is asking? A null answer means the message did not even come from
@@ -76,18 +87,71 @@ export function createDispatcher({
       return failure(message.id, ProviderErrors.unauthorized("Unrecognised message sender."));
     }
 
-    try {
-      // 2. May they call this? Checked BEFORE anything is read or executed.
-      const denied = assertSenderMayCall(context, message.method);
-      if (denied !== null) return failure(message.id, denied);
+    // 2. The log goes in BEFORE the work, so a call that never comes back still
+    //    leaves a trace of having been made.
+    await record(storage, context, "call", message.method, redactParams(message.method, message.params));
 
-      // 3. Only now does any work happen.
-      const result = await handle(deps, message.method, message.params);
-      return { type: "CODECRYPTO_RPC_RESULT", id: message.id, ok: true, result };
-    } catch (cause) {
-      return failure(message.id, toSerializedError(cause, context.fromPage));
+    const response = await run(deps, context, message);
+
+    if (!response.ok) {
+      await record(storage, context, "error", message.method, {
+        code: response.error.code,
+        message: response.error.message,
+      });
     }
+
+    return response;
   };
+}
+
+async function run(
+  deps: HandlerContext,
+  context: SenderContext,
+  message: RpcRequestMessage,
+): Promise<RpcResponseMessage> {
+  try {
+    // May they call this? Checked BEFORE anything is read or executed.
+    const denied = assertSenderMayCall(context, message.method);
+    if (denied !== null) return failure(message.id, denied);
+
+    // Only now does any work happen.
+    const result = await handle(deps, message.method, message.params);
+    return { type: "CODECRYPTO_RPC_RESULT", id: message.id, ok: true, result };
+  } catch (cause) {
+    return failure(message.id, toSerializedError(cause, context.fromPage));
+  }
+}
+
+/**
+ * Writes one activity-log entry, but only for calls that came from a web page.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE EXTENSION'S OWN UI IS NOT LOGGED
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: el popup consulta saldos cada 5 s mientras está abierto. Con
+ * `MAX_LOG_ENTRIES = 500` —y ese número está en el contrato inmutable— cuarenta
+ * minutos de popup abierto barren el registro entero. Lo que las specs 13-16
+ * quieren ver es qué le ha pedido cada dApp a la wallet; ahogarlo en el propio
+ * polling de la wallet convierte el registro en ruido y en una función de
+ * auditoría que no audita nada.
+ *
+ * El try/catch no es opcional: un fallo escribiendo el registro NO puede
+ * convertir una llamada correcta en un error para la dApp.
+ */
+async function record(
+  storage: WalletStorage,
+  context: SenderContext,
+  level: "call" | "error",
+  method: string,
+  detail: unknown,
+): Promise<void> {
+  if (!context.fromPage) return;
+
+  try {
+    await appendLog(storage, createLogEntry(level, method, context.origin, detail));
+  } catch (cause) {
+    console.error("[codecrypto] could not write to the activity log:", cause);
+  }
 }
 
 function failure(id: string, error: ReturnType<typeof ProviderErrors.internal>): RpcResponseMessage {
@@ -95,11 +159,20 @@ function failure(id: string, error: ReturnType<typeof ProviderErrors.internal>):
 }
 
 async function handle(
-  { storage, fetchBalances }: HandlerContext,
+  { storage, fetchBalances, fetchBalanceAt }: HandlerContext,
   method: string,
   params: unknown[],
 ): Promise<unknown> {
   switch (method) {
+    // ---- Public surface: callable by any web page, no permission needed ----
+    case "eth_chainId":
+      return handleChainId(storage);
+    case "eth_accounts":
+      return handleAccounts();
+    case "eth_getBalance":
+      return handleGetBalance(storage, fetchBalanceAt, params);
+
+    // ---- Internal surface: extension UI only ----
     case "wallet_createMnemonic":
       return handleCreateMnemonic();
     case "wallet_importMnemonic":
@@ -113,9 +186,53 @@ async function handle(
     case "wallet_reset":
       return handleReset(storage);
     default:
-      // Covers both the eth_* surface (phase 3+) and genuine typos.
+      // Covers the public methods still to come — eth_requestAccounts (phase 5),
+      // eth_sendTransaction and eth_signTypedData_v4 (phase 6),
+      // wallet_switchEthereumChain (phase 8) — and genuine typos.
       throw new ProviderError(ProviderErrors.unsupportedMethod(method));
   }
+}
+
+// ============================================================================
+// Public methods
+// ============================================================================
+
+async function handleChainId(storage: WalletStorage): Promise<Hex> {
+  return (await storage.get("cc:chainId")) ?? DEFAULT_CHAIN_ID;
+}
+
+/**
+ * Always the empty array, in this phase and for any unconnected origin.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS FUNCTION READS NOTHING, AND THAT IS THE POINT
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: el error clásico es que `eth_accounts` devuelva la cuenta activa.
+ * Eso convierte la wallet en un FINGERPRINT: cualquier web que visites sabe tu
+ * dirección sin haber pedido permiso, sin abrir una ventana y sin que te enteres
+ * — y una dirección de Ethereum es un identificador permanente con todo tu
+ * historial de transacciones colgando de él. Devolver `[]` para un origen no
+ * conectado es el comportamiento correcto (ver `resolveAccountForOrigin` en el
+ * contrato) y es un ítem de la rúbrica.
+ *
+ * Hasta la Fase 5 no existe `cc:connectedSites`, así que NINGÚN origen está
+ * conectado y la respuesta correcta es `[]` siempre. No se lee `cc:accounts` ni
+ * `cc:mnemonic`: sin esa lectura, filtrar una dirección desde aquí es
+ * imposible de escribir sin que se note. Hay un test que lo comprueba.
+ */
+function handleAccounts(): Address[] {
+  return [];
+}
+
+async function handleGetBalance(
+  storage: WalletStorage,
+  fetchBalanceAt: BalanceAtReader,
+  params: unknown[],
+): Promise<Hex> {
+  const { address, blockTag } = parseGetBalanceParams(params);
+  const network = await resolveActiveNetwork(storage);
+
+  return fetchBalanceAt(network, address, blockTag);
 }
 
 /**
@@ -302,6 +419,44 @@ function parseGetBalancesParams(params: unknown[]): { addresses: Address[] } {
   }
 
   return { addresses: addresses as Address[] };
+}
+
+const BLOCK_TAG_KEYWORDS: ReadonlySet<string> = new Set(["latest", "pending", "earliest"]);
+const BLOCK_NUMBER_PATTERN = /^0x[0-9a-fA-F]+$/;
+
+/**
+ * 🇪🇸 NOTA: `eth_getBalance` es PÚBLICO — lo llama una dApp, no nuestra UI — así
+ * que los params son entrada hostil y se validan uno a uno antes de tocar la
+ * red. Lo importante no es solo devolver -32602: es que una petición malformada
+ * NO llegue a abrir una conexión JSON-RPC. Hay un test que comprueba que el
+ * lector no se llamó.
+ */
+function parseGetBalanceParams(params: unknown[]): { address: Address; blockTag: BlockTag } {
+  if (!Array.isArray(params) || params.length === 0) {
+    throw invalidParams("eth_getBalance expects [address, blockTag?].");
+  }
+
+  const [address, blockTag] = params;
+
+  if (typeof address !== "string" || !ADDRESS_PATTERN.test(address)) {
+    throw invalidParams("eth_getBalance received a malformed address.");
+  }
+
+  // Both are seen in the wild for "no block given"; ethers omits it, some dApps
+  // send an explicit null.
+  if (blockTag === undefined || blockTag === null) {
+    return { address: address as Address, blockTag: "latest" };
+  }
+
+  if (typeof blockTag === "string") {
+    if (BLOCK_TAG_KEYWORDS.has(blockTag) || BLOCK_NUMBER_PATTERN.test(blockTag)) {
+      return { address: address as Address, blockTag: blockTag as BlockTag };
+    }
+  }
+
+  throw invalidParams(
+    'eth_getBalance expects a block tag of "latest", "pending", "earliest" or a hex block number.',
+  );
 }
 
 function parseSetDefaultAccountParams(params: unknown[]): { accountIndex: number } {

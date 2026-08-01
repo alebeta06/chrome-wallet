@@ -10,11 +10,36 @@
 import { PROTOCOL, type RuntimeMessage } from "@/types/messages";
 
 import { createDispatcher } from "@/lib/dispatch";
-import { createWalletStorage } from "@/lib/storage";
+import { createWalletStorage, type WalletStorage } from "@/lib/storage";
 
-const dispatch = createDispatcher({ storage: createWalletStorage() });
+const storage = createWalletStorage();
+const dispatch = createDispatcher({ storage });
 
 console.log(`[${PROTOCOL}] background service worker alive`);
+
+/**
+ * Generates the EIP-6963 identity once, and only once.
+ *
+ * 🇪🇸 NOTA: el uuid tiene que ser ESTABLE durante toda la instalación. Uno nuevo
+ * en cada carga de página haría que la dApp viese dos wallets distintas al
+ * recargar, y un selector multi-wallet acumularía entradas duplicadas de la
+ * misma extensión.
+ *
+ * Lo genera el background y no el content script por una razón concreta: hay un
+ * content script por PESTAÑA, y varias pestañas abriéndose a la vez generarían
+ * uuids distintos y competirían por escribirlos. El service worker es uno solo.
+ *
+ * Esto es una escritura en storage, no estado de módulo: al despertar el worker
+ * vuelve a comprobarlo y no escribe nada si ya existe.
+ */
+async function ensureProviderUuid(area: WalletStorage): Promise<void> {
+  if ((await area.get("cc:providerUuid")) !== undefined) return;
+  await area.set("cc:providerUuid", crypto.randomUUID());
+}
+
+void ensureProviderUuid(storage).catch((cause: unknown) => {
+  console.error(`[${PROTOCOL}] could not seed the provider uuid:`, cause);
+});
 
 /**
  * 🇪🇸 NOTA: el gotcha de MV3 en Chrome. Esto NO funciona:
