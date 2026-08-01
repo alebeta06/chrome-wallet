@@ -221,3 +221,191 @@ pedir la frase y sin pasar por el onboarding.
 
 Repítelo después de que el service worker se duerma (~30 s): el resultado es el
 mismo, porque el estado se relee de storage en cada petición.
+
+---
+
+# Fase 3 — Provider inyectado y EIP-6963
+
+Requiere `pnpm build` y recargar la extensión (↻) en `chrome://extensions`.
+Además hacen falta Anvil y un servidor estático:
+
+```bash
+anvil                                          # http://localhost:8545, chainId 31337
+
+# desde la raíz del repo, en otra terminal:
+python3 -m http.server 8080 --directory extension
+#   → http://localhost:8080/test.html
+```
+
+> 🇪🇸 NOTA: **por HTTP, nunca por `file://`.** Con `file://` el origin es `null`,
+> un origen opaco. En la Fase 5 los permisos se guardan POR ORIGEN, así que
+> probar contra un origen opaco daría por buenas cosas que no lo son.
+
+`extension/test.html` es **desechable**: la dApp de verdad es el Next.js de la
+Fase 4 y esta página se borra entonces.
+
+## 13. El content script llega hasta la página (empieza por aquí)
+
+Que `test.html` no acabe en `dist/` es correcto y es irrelevante para esto: lo
+que importa es que la página, servida desde `localhost:8080`, cae dentro de
+`<all_urls>` y recibe el content script. Si esto falla, todo lo demás de la lista
+es ruido.
+
+Abre `http://localhost:8080/test.html` y en **su** consola:
+
+```js
+window.codecrypto        // objeto, no undefined
+window.codecrypto.isCodeCrypto   // true
+window.codecrypto.isMetaMask     // false
+```
+
+Y arriba del todo del log de la consola tiene que estar:
+
+```
+[codecrypto] content script loaded at http://localhost:8080
+```
+
+> `isMetaMask: false` es deliberado. Mentir ahí rompe las dApps que ramifican
+> por ese flag, y es deshonesto.
+
+## 14. La wallet aparece por EIP-6963, con su icono
+
+En la sección 1 de la página, la tarjeta **CodeCrypto Wallet** con:
+
+- El **icono renderizado**, no un cuadro roto. Es la comprobación real de que el
+  data URI es un SVG válido: los selectores multi-wallet lo meten en un `<img>`.
+- `academy.codecrypto.wallet` como rdns.
+- Un uuid con forma de UUIDv4.
+
+Pulsa **Re-dispatch eip6963:requestProvider**: la tarjeta sigue ahí y no se
+duplica. Eso comprueba el segundo de los dos anuncios — el que atiende a las
+dApps que montan su selector más tarde.
+
+## 15. Los métodos públicos
+
+| Botón | Esperado |
+|---|---|
+| `eth_chainId` | `"0x7a69"` (Anvil) |
+| `eth_accounts` | `[]` — **array vacío, con la wallet cargada y con cuentas** |
+| `eth_getBalance` sobre `0xf39Fd…92266` | el saldo real de Anvil en hex |
+| `eth_getBalance with junk` | error **-32602**, y Anvil no recibe ninguna petición |
+
+> 🇪🇸 NOTA: el `[]` de `eth_accounts` es el ítem de la rúbrica, no un "todavía no
+> está implementado". Devolver la cuenta activa a un origen no conectado
+> convierte la wallet en un **fingerprint**: cualquier web que visites sabría tu
+> dirección sin pedir permiso y sin abrir una ventana. Las cuentas llegan en la
+> Fase 5, detrás de `eth_requestAccounts` y de `connect.html`.
+
+## 16. Un método público sin implementar da 4200, no 4100
+
+Botón **eth_requestAccounts**. Esperado: error con `code: 4200`.
+
+Que sea 4200 y no 4100 es lo que se comprueba: 4100 significaría que la frontera
+de confianza está rechazando métodos públicos y ninguna dApp podría hablar con la
+wallet. 4200 significa "pasaste el control, esto aún no existe" — llega en la
+Fase 5.
+
+## 17. El provider existe dentro de un iframe (spec 34)
+
+La sección 4 embebe la propia página con `?frame=1`. Tiene que decir en verde:
+
+```
+iframe: provider present ✓ (CodeCrypto Wallet)
+```
+
+Es lo que cubren `all_frames: true` y `match_about_blank: true` del manifest: hay
+dApps que viven dentro de un iframe, y una wallet que solo se inyecta en el frame
+principal no existe para ellas.
+
+## 18. El uuid es estable entre recargas
+
+Apunta el uuid de la tarjeta. Recarga la página **dos veces** (F5). Tiene que ser
+**el mismo** las tres veces.
+
+```js
+await chrome.storage.local.get('cc:providerUuid')   // en la consola de la extensión
+```
+
+> 🇪🇸 NOTA: si cambiara en cada carga, la dApp vería una wallet distinta cada vez
+> y un selector multi-wallet acumularía entradas duplicadas de la misma
+> extensión. Por eso lo genera el service worker una sola vez y vive en storage:
+> hay un content script por pestaña, y varias pestañas abriéndose a la vez
+> generarían uuids distintos.
+
+## 19. Convivencia con MetaMask
+
+Con MetaMask instalado y habilitado, recarga `test.html`:
+
+- La sección 1 lista **las dos** wallets, cada una con su icono y su rdns.
+- El contador dice "2 wallet(s) announced".
+- **Cero errores de `window.ethereum` en la consola.**
+
+Lo último es consecuencia de una decisión: `inject.ts` no toca `window.ethereum`
+en absoluto. Pelearse por esa propiedad es como las wallets se rompen entre
+ellas, y el que pierde siempre es el usuario delante de una dApp que no conecta.
+
+## 20. El relay de eventos y el cerrojo del origen
+
+Todavía no hay nada que emita eventos — `wallet_setSiteAccount` es Fase 5 y
+`wallet_setActiveNetwork` es Fase 8 — así que el relay se prueba disparando uno a
+mano.
+
+En `chrome://extensions` → tarjeta de la extensión → **service worker**, en su
+consola:
+
+```js
+const [tab] = await chrome.tabs.query({ url: 'http://localhost:8080/*' })
+
+// (a) evento GLOBAL: expectedOrigin null, va a cualquier origen conectado
+await chrome.tabs.sendMessage(tab.id, {
+  type: 'CODECRYPTO_TAB_EVENT', eventName: 'chainChanged',
+  data: '0xaa36a7', expectedOrigin: null,
+})
+
+// (b) evento por ORIGEN, con el origen correcto
+await chrome.tabs.sendMessage(tab.id, {
+  type: 'CODECRYPTO_TAB_EVENT', eventName: 'accountsChanged',
+  data: ['0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'],
+  expectedOrigin: 'http://localhost:8080',
+})
+
+// (c) el mismo, con el origen EQUIVOCADO
+await chrome.tabs.sendMessage(tab.id, {
+  type: 'CODECRYPTO_TAB_EVENT', eventName: 'accountsChanged',
+  data: ['0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'],
+  expectedOrigin: 'https://evil.example',
+})
+```
+
+Esperado en el panel de eventos de la página: llegan **(a)** y **(b)**, y **(c)
+no llega**.
+
+> 🇪🇸 NOTA: (c) es el test que importa. Los tabId se reciclan, y si una pestaña
+> navega de la dApp A a la dApp B justo entre el `chrome.tabs.query` y el
+> `sendMessage`, el evento aterriza en el sitio equivocado y le filtras a B qué
+> cuenta usas en A. Es una ventana de milisegundos y una fuga real; la
+> comprobación es de una línea y vive en el content script.
+
+## 21. El registro de actividad (base de las specs 13-16)
+
+Después de haber pulsado unos cuantos botones en `test.html`, en la consola de
+una página de la extensión:
+
+```js
+(await chrome.storage.local.get('cc:logs'))['cc:logs']
+```
+
+Esperado:
+
+- Una entrada `call` por cada llamada, con `origin: 'http://localhost:8080'`.
+- Una entrada `error` extra detrás de cada llamada que falló (el 4200 de
+  `eth_requestAccounts`, el -32602 de los params malos).
+- **Ninguna entrada del polling de saldos del popup.** Abre el popup, déjalo
+  medio minuto, ciérralo y vuelve a mirar: el registro no ha crecido.
+
+Lo último es deliberado. El popup consulta saldos cada 5 s; con
+`MAX_LOG_ENTRIES = 500` —y ese número está en el contrato inmutable— cuarenta
+minutos de popup abierto barrerían el registro entero y enterrarían justo lo que
+las specs 13-16 quieren ver.
+
+La UI que pinta todo esto es la Fase 9. Aquí solo se acumula.
