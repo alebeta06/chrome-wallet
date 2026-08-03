@@ -9,6 +9,13 @@ interface AccountRowProps {
   /** undefined while unknown — never rendered as 0.0000. */
   balance: Hex | undefined;
   isDefault: boolean;
+  /**
+   * 🇪🇸 NOTA: solo pinta una marca, no cambia lo que hace el click. Esta fila
+   * SIEMPRE cambia la cuenta por defecto; la del sitio se cambia en la banda de
+   * arriba. Que el mismo control hiciera una cosa u otra según el contexto haría
+   * imposible saber qué va a pasar antes de pulsarlo.
+   */
+  isActiveSite: boolean;
   isInitialLoad: boolean;
   onSelect(index: number): void;
 }
@@ -18,6 +25,7 @@ export function AccountRow({
   address,
   balance,
   isDefault,
+  isActiveSite,
   isInitialLoad,
   onSelect,
 }: AccountRowProps) {
@@ -65,6 +73,12 @@ export function AccountRow({
         {isDefault && (
           <span className="account-row__default-mark" data-testid={`account-default-mark-${index}`}>
             default
+          </span>
+        )}
+
+        {isActiveSite && (
+          <span className="account-row__site-mark" data-testid={`account-site-mark-${index}`}>
+            this site
           </span>
         )}
 

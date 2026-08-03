@@ -364,3 +364,154 @@ input[type="checkbox"] {
 .feedback--bad {
   color: var(--error);
 }
+
+/* --------------------------------------------------------------------------
+   Approval windows (connect.html, notification.html)
+
+   🇪🇸 NOTA: estas ventanas las abre el background con chrome.windows.create y
+   tienen su propio tamaño, así que llevan `body.surface-window` y NO el ancho
+   fijo de 360px del popup.
+   -------------------------------------------------------------------------- */
+
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  min-height: 100vh;
+}
+
+.approval__header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-3);
+}
+
+.approval__eyebrow {
+  margin: 0 0 var(--space-1);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+/*
+ * 🇪🇸 NOTA: el origen es el elemento más grande de la ventana, y en
+ * monoespaciada. Es la única pregunta que el usuario tiene que poder contestar
+ * de un vistazo antes de dar acceso: "¿de dónde viene esto?". Un dominio
+ * parecido al esperado es la forma más barata de phishing que existe.
+ * `word-break` para que un dominio largo se vea entero en vez de recortado —
+ * un origen truncado es justo lo que un atacante necesita.
+ */
+.approval__origin {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.approval__ask {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.approval__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-3);
+}
+
+.approval__actions > button {
+  flex: 1;
+}
+
+.account-row--selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   Connected sites — the per-origin model made visible
+   -------------------------------------------------------------------------- */
+
+/*
+ * 🇪🇸 NOTA: esta banda es la mitad del valor de la Fase 5. Sin ella el usuario
+ * ve un único selector de cuenta, cambia la cuenta por defecto esperando que la
+ * dApp lo note, no pasa nada, y el modelo por origen parece un bug. Con ella,
+ * las dos cuentas están a la vista y cada control dice a quién afecta.
+ */
+.site-band {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.site-band__origin {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.site-band__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.site-band__account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.site-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.site-row__origin {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-all;
+  min-width: 0;
+}
+
+.site-row__account {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.account-row__site-mark {
+  color: var(--accent);
+  font-size: 11px;
+  flex: none;
+}
