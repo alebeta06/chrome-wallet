@@ -797,22 +797,140 @@ describe("eth_accounts", () => {
   });
 
   /**
-   * The structural version of the assertion above, in the same spirit as the
-   * `wallet_setDefaultAccount` test further up.
+   * The structural assertion, INVERTED in phase 5.
    *
-   * 🇪🇸 NOTA: comprobar que la respuesta es `[]` no impide que mañana alguien
-   * escriba `return accounts.slice(0, 1)` "solo para que la dApp de pruebas
-   * funcione". Comprobar que el handler NO LEE las cuentas sí: sin esa lectura,
-   * filtrar una dirección desde aquí es imposible de escribir sin que el test se
-   * entere. Es la misma técnica y por el mismo motivo.
+   * 🇪🇸 NOTA: hasta la Fase 4 esto afirmaba que el handler NO leía `cc:accounts`
+   * — con la respuesta fija en `[]`, no leer nada demostraba que no podía
+   * filtrar una dirección. Desde la Fase 5 la respuesta depende de quién
+   * pregunta, así que leer las cuentas es obligatorio y aquella aserción ya no
+   * describe nada.
+   *
+   * El invariante equivalente hoy es el contrario: el handler TIENE que leer
+   * `cc:connectedSites`. Sin esa lectura no hay forma de saber si el origen
+   * tiene permiso, y devolver una dirección sería devolverla incondicionalmente
+   * — que es exactamente el fingerprint que se quiere evitar. La aserción se da
+   * la vuelta porque el invariante se dio la vuelta, no para poner el test en
+   * verde.
+   *
+   * `cc:mnemonic` sigue sin leerse, y eso no cambia en ninguna fase.
    */
-  it("never even reads the accounts", async () => {
+  it("decides from the connected sites, not from the wallet alone", async () => {
     const { readKeys, dispatch } = setup(LOADED_WALLET);
 
     await dispatch(request("eth_accounts"), pageSender(), RUNTIME_ID);
 
-    expect(readKeys).not.toContain("cc:accounts");
+    expect(readKeys).toContain("cc:connectedSites");
     expect(readKeys).not.toContain("cc:mnemonic");
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE PER-ORIGIN MODEL, END TO END THROUGH THE DISPATCHER
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: dos dApps conectadas a la vez, a cuentas distintas, preguntando lo
+   * mismo y recibiendo respuestas distintas. Ésta es la fase entera en un test.
+   */
+  it("answers each connected origin with its own account", async () => {
+    const { dispatch } = setup({
+      ...LOADED_WALLET,
+      "cc:connectedSites": {
+        "https://vercel.example": {
+          origin: "https://vercel.example",
+          accountIndex: 1,
+          connectedAt: 0,
+          lastUsedAt: 0,
+        },
+        "http://localhost:3000": {
+          origin: "http://localhost:3000",
+          accountIndex: 0,
+          connectedAt: 0,
+          lastUsedAt: 0,
+        },
+      },
+    });
+
+    const fromVercel = expectResult<string[]>(
+      await dispatch(request("eth_accounts"), pageSender("https://vercel.example"), RUNTIME_ID),
+    );
+    const fromLocal = expectResult<string[]>(
+      await dispatch(request("eth_accounts"), pageSender("http://localhost:3000"), RUNTIME_ID),
+    );
+
+    expect(fromVercel).toEqual([ANVIL_SECOND]);
+    expect(fromLocal).toEqual([ANVIL_FIRST]);
+    // And neither learns anything about the other.
+    expect(fromVercel).not.toContain(ANVIL_FIRST);
+    expect(fromLocal).not.toContain(ANVIL_SECOND);
+  });
+
+  it("still answers [] to a third origin that never connected", async () => {
+    const { dispatch } = setup({
+      ...LOADED_WALLET,
+      "cc:connectedSites": {
+        "https://vercel.example": {
+          origin: "https://vercel.example",
+          accountIndex: 1,
+          connectedAt: 0,
+          lastUsedAt: 0,
+        },
+      },
+    });
+
+    expect(
+      expectResult<string[]>(
+        await dispatch(request("eth_accounts"), pageSender("https://evil.example"), RUNTIME_ID),
+      ),
+    ).toEqual([]);
+  });
+
+  /**
+   * 🇪🇸 NOTA: se devuelve UNA cuenta, no la lista entera. El sitio conectado no
+   * tiene por qué enterarse de cuántas cuentas tienes ni de cuáles son las
+   * demás; mandar el array completo filtraría el tamaño de la wallet y todas las
+   * direcciones de golpe.
+   */
+  it("exposes one account, never the whole wallet", async () => {
+    const { dispatch } = setup({
+      ...LOADED_WALLET,
+      "cc:connectedSites": {
+        "https://dapp.example": {
+          origin: "https://dapp.example",
+          accountIndex: 0,
+          connectedAt: 0,
+          lastUsedAt: 0,
+        },
+      },
+    });
+
+    const accounts = expectResult<string[]>(
+      await dispatch(request("eth_accounts"), pageSender("https://dapp.example"), RUNTIME_ID),
+    );
+
+    expect(accounts).toHaveLength(1);
+    expect(accounts).not.toContain(ANVIL_SECOND);
+  });
+
+  /** Connected to account 1, then re-imported with fewer accounts. */
+  it("answers [] when the stored index no longer fits", async () => {
+    const { dispatch } = setup({
+      "cc:mnemonic": ANVIL_PHRASE,
+      "cc:accounts": [ANVIL_FIRST],
+      "cc:chainId": ANVIL_CHAIN_ID,
+      "cc:connectedSites": {
+        "https://dapp.example": {
+          origin: "https://dapp.example",
+          accountIndex: 1,
+          connectedAt: 0,
+          lastUsedAt: 0,
+        },
+      },
+    });
+
+    expect(
+      expectResult<string[]>(
+        await dispatch(request("eth_accounts"), pageSender("https://dapp.example"), RUNTIME_ID),
+      ),
+    ).toEqual([]);
   });
 
   it("does not leak the mnemonic through the response", async () => {

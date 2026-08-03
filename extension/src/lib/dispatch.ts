@@ -26,6 +26,7 @@ import {
   type BlockTag,
   type Hex,
   type NetworkConfig,
+  type Origin,
   type RpcRequestMessage,
   type RpcResponseMessage,
   type SenderContext,
@@ -42,6 +43,7 @@ import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
 import { appendLog, createLogEntry, redactParams } from "./logs";
 import { DEFAULT_CHAIN_ID, defaultNetworks } from "./networks";
+import { resolveSiteAccount } from "./sites";
 import type { WalletStorage } from "./storage";
 
 export interface DispatcherDeps {
@@ -115,7 +117,7 @@ async function run(
     if (denied !== null) return failure(message.id, denied);
 
     // Only now does any work happen.
-    const result = await handle(deps, message.method, message.params);
+    const result = await handle(deps, context, message.method, message.params);
     return { type: "CODECRYPTO_RPC_RESULT", id: message.id, ok: true, result };
   } catch (cause) {
     return failure(message.id, toSerializedError(cause, context.fromPage));
@@ -158,8 +160,17 @@ function failure(id: string, error: ReturnType<typeof ProviderErrors.internal>):
   return { type: "CODECRYPTO_RPC_RESULT", id, ok: false, error };
 }
 
+/**
+ * 🇪🇸 NOTA: el `context` llega hasta aquí desde la Fase 5 y no antes. En la Fase
+ * 3 se dejó fuera a propósito: ningún handler necesitaba el origen, y un
+ * parámetro que nadie lee es ruido que `noUnusedParameters` habría convertido en
+ * un `_context` decorativo. Ahora `eth_accounts` sí lo necesita —la respuesta
+ * depende de QUIÉN pregunta— así que el hilo se pasa cuando hay algo al otro
+ * extremo tirando de él.
+ */
 async function handle(
   { storage, fetchBalances, fetchBalanceAt }: HandlerContext,
+  context: SenderContext,
   method: string,
   params: unknown[],
 ): Promise<unknown> {
@@ -168,7 +179,7 @@ async function handle(
     case "eth_chainId":
       return handleChainId(storage);
     case "eth_accounts":
-      return handleAccounts();
+      return handleAccounts(storage, context.origin);
     case "eth_getBalance":
       return handleGetBalance(storage, fetchBalanceAt, params);
 
@@ -202,26 +213,33 @@ async function handleChainId(storage: WalletStorage): Promise<Hex> {
 }
 
 /**
- * Always the empty array, in this phase and for any unconnected origin.
+ * The accounts THIS origin is allowed to see. Empty for anyone unconnected.
  *
  * ---------------------------------------------------------------------------
- * THIS FUNCTION READS NOTHING, AND THAT IS THE POINT
+ * THE ANSWER DEPENDS ON WHO IS ASKING, AND ON NOTHING ELSE
  * ---------------------------------------------------------------------------
- * 🇪🇸 NOTA: el error clásico es que `eth_accounts` devuelva la cuenta activa.
- * Eso convierte la wallet en un FINGERPRINT: cualquier web que visites sabe tu
- * dirección sin haber pedido permiso, sin abrir una ventana y sin que te enteres
- * — y una dirección de Ethereum es un identificador permanente con todo tu
- * historial de transacciones colgando de él. Devolver `[]` para un origen no
- * conectado es el comportamiento correcto (ver `resolveAccountForOrigin` en el
- * contrato) y es un ítem de la rúbrica.
+ * 🇪🇸 NOTA: el error clásico es que `eth_accounts` devuelva la cuenta activa a
+ * cualquiera. Eso convierte la wallet en un FINGERPRINT: cualquier web que
+ * visites sabe tu dirección sin haber pedido permiso, sin abrir una ventana y
+ * sin que te enteres — y una dirección de Ethereum es un identificador
+ * permanente con todo tu historial de transacciones colgando de él.
  *
- * Hasta la Fase 5 no existe `cc:connectedSites`, así que NINGÚN origen está
- * conectado y la respuesta correcta es `[]` siempre. No se lee `cc:accounts` ni
- * `cc:mnemonic`: sin esa lectura, filtrar una dirección desde aquí es
- * imposible de escribir sin que se note. Hay un test que lo comprueba.
+ * Se devuelve UNA sola cuenta, no la lista entera, y ésa es la otra mitad del
+ * modelo por origen: el sitio conectado ve su cuenta y no se entera siquiera de
+ * cuántas más tienes. Enviar el array completo filtraría el tamaño de tu wallet
+ * y todas las direcciones a la vez, que es lo que hace la mayoría de las wallets
+ * y no hay ninguna razón para copiar.
  */
-function handleAccounts(): Address[] {
-  return [];
+async function handleAccounts(storage: WalletStorage, origin: Origin): Promise<Address[]> {
+  const [sites, accounts] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:accounts"),
+  ]);
+
+  const list = accounts ?? [];
+  const index = resolveSiteAccount(sites, origin, list.length);
+
+  return index === null ? [] : [list[index]];
 }
 
 async function handleGetBalance(
