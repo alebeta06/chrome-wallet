@@ -35,6 +35,21 @@ export interface DisplayError {
 }
 
 /**
+ * Did the user simply say no?
+ *
+ * 🇪🇸 NOTA: 4001 NO es un fallo y no merece un banner rojo. El usuario pulsó
+ * "rechazar" y el sistema hizo exactamente lo que le pidió; enseñarle un error
+ * por ello es culparle de haber usado bien la wallet. La dApp vuelve al botón de
+ * conectar y no dice nada.
+ *
+ * El timeout de la ventana de aprobación también llega como 4001 —a propósito—
+ * porque la reacción correcta es la misma.
+ */
+export function isUserRejection(cause: unknown): boolean {
+  return describeProviderError(cause).code === 4001;
+}
+
+/**
  * 🇪🇸 NOTA: la comprobación es `typeof code === "number"` y no `instanceof
  * Error`. El error cruza dos boundaries antes de llegar aquí (el service worker
  * lo serializa, `inject.ts` lo reconstruye), y aunque la extensión sí devuelve

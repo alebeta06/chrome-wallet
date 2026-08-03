@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PROVIDER_ERROR_MESSAGES, describeProviderError } from "@/lib/errors";
+import { PROVIDER_ERROR_MESSAGES, describeProviderError, isUserRejection } from "@/lib/errors";
 
 /** An EIP-1193 rejection as the injected provider rebuilds it. */
 function providerError(code: number, message: string, data?: unknown) {
@@ -85,5 +85,44 @@ describe("describeProviderError", () => {
 
   it("keeps a message that would otherwise be empty", () => {
     expect(describeProviderError(new Error("")).detail.length).toBeGreaterThan(0);
+  });
+});
+
+describe("isUserRejection", () => {
+  /**
+   * 🇪🇸 NOTA: 4001 no es un fallo. El usuario pulsó "rechazar" y el sistema hizo
+   * exactamente lo que le pidió; enseñarle un banner rojo por eso es culparle de
+   * haber usado bien la wallet.
+   */
+  it("recognises a rejection so the dApp can stay quiet", () => {
+    expect(isUserRejection(providerError(4001, "User rejected the request."))).toBe(true);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el timeout de la ventana de aprobación llega TAMBIÉN como 4001, a
+   * propósito, porque la reacción correcta de la dApp es la misma: volver al
+   * botón de conectar sin ruido.
+   */
+  it("treats an approval timeout the same way", () => {
+    expect(
+      isUserRejection(providerError(4001, "The connection request timed out after 60 seconds.")),
+    ).toBe(true);
+  });
+
+  /**
+   * 🇪🇸 NOTA: 4100 SÍ merece decir algo — "no tienes wallet configurada" pide una
+   * acción concreta del usuario, mientras que "has cancelado" no pide nada. Que
+   * la wallet devuelva códigos distintos es lo que permite esta diferencia.
+   */
+  it.each([4100, 4200, 4900, -32602, -32603])("does not swallow code %i", (code) => {
+    expect(isUserRejection(providerError(code, "nope"))).toBe(false);
+  });
+
+  it.each([
+    ["a plain Error", new Error("boom")],
+    ["null", null],
+    ["a string", "4001"],
+  ])("does not treat %s as a rejection", (_label, cause) => {
+    expect(isUserRejection(cause)).toBe(false);
   });
 });

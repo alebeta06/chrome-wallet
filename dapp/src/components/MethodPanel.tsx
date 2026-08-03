@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { describeProviderError, type DisplayError } from "@/lib/errors";
 import { formatEther, isHexQuantity, looksLikeAddress } from "@/lib/format";
@@ -25,11 +25,23 @@ type CallState =
 
 interface Props {
   provider: EIP1193Provider;
+  /** Bumped when accountsChanged arrives, so a stale answer is not left on screen. */
+  accountsRevision: number;
 }
 
-export function MethodPanel({ provider }: Props) {
+export function MethodPanel({ provider, accountsRevision }: Props) {
   const [state, setState] = useState<CallState>({ status: "idle" });
   const [address, setAddress] = useState(ANVIL_FIRST);
+
+  /**
+   * 🇪🇸 NOTA: al cambiar la cuenta conectada se borra el último resultado. Un
+   * `eth_accounts` que sigue mostrando `[]` en pantalla después de conectar —o
+   * la dirección antigua después de cambiar de cuenta desde el popup— es peor
+   * que no mostrar nada: parece que la wallet no ha hecho caso.
+   */
+  useEffect(() => {
+    setState({ status: "idle" });
+  }, [accountsRevision]);
 
   const addressIsValid = looksLikeAddress(address);
   const busy = state.status === "pending";
@@ -143,22 +155,16 @@ export function MethodPanel({ provider }: Props) {
       <Output state={state} />
 
       <div className="callout" data-testid="accounts-explainer">
-        <strong>Why eth_accounts answers []</strong> — this origin has not been granted
-        permission, and an unconnected site gets an empty array by design. Returning the
-        active account would turn the wallet into a fingerprint: any page you visit would
-        learn a permanent identifier with your whole transaction history attached, without
-        a prompt and without you noticing. Accounts arrive behind{" "}
-        <code>eth_requestAccounts</code> and an approval window — which is why that button
-        answers <code>4200</code> today.
-      </div>
-
-      <div className="row" style={{ marginTop: "var(--space-4)" }}>
-        <button type="button" className="action primary" disabled data-testid="btn-connect">
-          Connect wallet
-        </button>
-        <span className="muted" style={{ fontSize: 13 }}>
-          Disabled until phase 5, which adds per-origin permissions and the approval window.
-        </span>
+        <strong>What eth_accounts answers, and why</strong> — before you connect, an empty
+        array. Returning the active account to an unconnected site would turn the wallet
+        into a fingerprint: any page you visit would learn a permanent identifier with your
+        whole transaction history attached, without a prompt and without you noticing.
+        <br />
+        <br />
+        After connecting it answers <strong>one</strong> account — the one you approved for{" "}
+        <em>this</em> origin, never the whole wallet. Connect the same wallet from another
+        origin and it can be a different account, at the same time, with neither site
+        learning anything about the other.
       </div>
     </div>
   );

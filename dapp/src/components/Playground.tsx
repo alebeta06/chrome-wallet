@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { EventLog } from "@/components/EventLog";
+import { ConnectPanel } from "@/components/ConnectPanel";
 import { MethodPanel } from "@/components/MethodPanel";
 import { NoWalletsEmptyState } from "@/components/NoWalletsEmptyState";
 import { ProviderCard } from "@/components/ProviderCard";
@@ -43,6 +44,14 @@ export function Playground() {
   const selected = providers.find((entry) => entry.info.rdns === selectedRdns) ?? null;
   const events = useProviderEvents(selected?.provider ?? null);
 
+  /**
+   * 🇪🇸 NOTA: cada `accountsChanged` que llega hace que el panel de conexión
+   * relea `eth_accounts`. Es lo que hace visible el modelo por origen: cambias
+   * la cuenta de este sitio desde el popup y la página se actualiza sola, sin
+   * recargar y sin que la otra dApp se entere de nada.
+   */
+  const accountsRevision = events.filter((event) => event.name === "accountsChanged").length;
+
   if (providers.length === 0) {
     return (
       <section className="section">
@@ -77,16 +86,26 @@ export function Playground() {
           </section>
 
           <section className="section">
-            <h2 className="section-title">3 · Public methods (no permission required)</h2>
+            <h2 className="section-title">3 · Connection</h2>
             <p className="section-note">
-              The three methods the wallet answers without any approval. Everything else
-              answers <code>4200</code> until the phase that implements it.
+              <code>eth_requestAccounts</code> asks the wallet for permission. The account
+              you approve is bound to <strong>this origin only</strong> — the same wallet
+              can be on a different account for a different site, at the same time.
             </p>
-            <MethodPanel provider={selected.provider} />
+            <ConnectPanel provider={selected.provider} accountsRevision={accountsRevision} />
           </section>
 
           <section className="section">
-            <h2 className="section-title">4 · Provider events</h2>
+            <h2 className="section-title">4 · Public methods (no permission required)</h2>
+            <p className="section-note">
+              These the wallet answers without any approval. Everything else answers{" "}
+              <code>4200</code> until the phase that implements it.
+            </p>
+            <MethodPanel provider={selected.provider} accountsRevision={accountsRevision} />
+          </section>
+
+          <section className="section">
+            <h2 className="section-title">5 · Provider events</h2>
             <p className="section-note">
               Live <code>accountsChanged</code>, <code>chainChanged</code>,{" "}
               <code>connect</code> and <code>disconnect</code>, wired now so the channel is
@@ -96,7 +115,7 @@ export function Playground() {
           </section>
 
           <section className="section">
-            <h2 className="section-title">5 · Injection inside an iframe</h2>
+            <h2 className="section-title">6 · Injection inside an iframe</h2>
             <p className="section-note">
               The extension declares <code>all_frames</code> because plenty of dApps live
               inside an iframe, and a wallet that only injects into the top frame does not
