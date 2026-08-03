@@ -241,12 +241,16 @@ cd dapp && pnpm dev         # → http://localhost:3000
 > probar contra un origen opaco daría por buenas cosas que no lo son.
 
 Estas comprobaciones se hacían contra `extension/test.html`, una página estática
-que se borró en la Fase 4. Ahora se hacen contra la dApp, y **todas valen igual
-en `localhost:3000` que en la URL de Vercel** — de hecho conviene pasarlas por
-las dos, porque son dos orígenes distintos y en la Fase 5 eso empieza a importar.
+que se borró en la Fase 4. Ahora se hacen contra la dApp, en **dos orígenes**:
 
-`__URL_DE_VERCEL__` ← anota aquí la tuya cuando despliegues
-([`docs/DEPLOY.md`](../../docs/DEPLOY.md)).
+| | |
+|---|---|
+| Local | http://localhost:3000 |
+| Producción | **https://chrome-wallet.vercel.app** |
+
+Conviene pasarlas por los dos. Son orígenes distintos, y en la Fase 5 eso deja de
+ser un detalle: cada uno tendrá su propia cuenta conectada, y ésa es la mitad
+interesante del modelo por origen. Ver [`docs/DEPLOY.md`](../../docs/DEPLOY.md).
 
 ## 13. El content script llega hasta la página (empieza por aquí)
 
