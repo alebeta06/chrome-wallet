@@ -3,6 +3,23 @@
 Wallet de Ethereum como extensión de Chrome (MV3), escrita desde cero para el
 Máster CodeCrypto. Sin smart contracts en el alcance.
 
+## 🔗 Demo en vivo
+
+**dApp de prueba → https://chrome-wallet.vercel.app**
+
+Es la página que consume la wallet desde fuera, como lo haría cualquier web.
+
+> **Necesita la extensión cargada en tu Chrome para hacer algo.** Si la abres sin
+> ella, te dirá *"No wallet announced itself"* — y no es un error de la página:
+> es lo que tiene que decir. La dApp descubre wallets por
+> [EIP-6963](https://eips.ethereum.org/EIPS/eip-6963), o sea que espera a que una
+> extensión instalada se anuncie. Sin ninguna instalada no se anuncia nadie.
+>
+> Para verla funcionar, sigue [Instalar la extensión](#instalar-la-extensión) y
+> recarga. Aparecerá en la lista junto a cualquier otra wallet que ya tengas.
+
+## Estructura
+
 El repo tiene **dos proyectos independientes**, cada uno con su `package.json` y
 su lockfile:
 
