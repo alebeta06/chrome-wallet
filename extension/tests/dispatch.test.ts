@@ -3,12 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ErrorCode,
   MAX_LOG_ENTRIES,
+  type ConnectedSite,
   type LogEntry,
+  type Origin,
   type RpcRequestMessage,
   type RpcResponseMessage,
+  type SerializedProviderError,
   type WalletSnapshot,
 } from "@/types/messages";
-import { createDispatcher } from "@/lib/dispatch";
+import type { ApprovalCoordinator, ConnectRequestInput } from "@/lib/approvals";
+import type { EventEmitter } from "@/lib/events";
+import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
 import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID, defaultNetworks } from "@/lib/networks";
 import { ProviderError } from "@/lib/errors";
@@ -70,6 +75,7 @@ function setup(
   seed: Record<string, unknown> = {},
   fetchBalances?: BalanceReader,
   fetchBalanceAt?: BalanceAtReader,
+  extra: Partial<DispatcherDeps> = {},
 ) {
   const area = createMemoryStorageArea(seed);
 
@@ -95,8 +101,38 @@ function setup(
       storage: createWalletStorage(observedArea),
       ...(fetchBalances === undefined ? {} : { fetchBalances }),
       ...(fetchBalanceAt === undefined ? {} : { fetchBalanceAt }),
+      ...extra,
     }),
   };
+}
+
+/** Records every provider event the dispatcher tried to emit. */
+function recordingEmitter() {
+  const emitted: Array<{ eventName: string; data: unknown; changedOrigin: Origin | null }> = [];
+
+  const emit: EventEmitter = async (eventName, data, options) => {
+    emitted.push({ eventName, data, changedOrigin: options.changedOrigin });
+  };
+
+  return { emit, emitted };
+}
+
+/** An approval coordinator whose answer the test decides up front. */
+function fakeApprovals(outcome: { approve: number } | { reject: SerializedProviderError }) {
+  const asked: ConnectRequestInput[] = [];
+
+  const approvals: ApprovalCoordinator = {
+    requestConnect: async (input) => {
+      asked.push(input);
+      if ("approve" in outcome) return outcome.approve;
+      throw new ProviderError(outcome.reject);
+    },
+    settle: async () => {},
+    reject: async () => {},
+    read: async () => null,
+  };
+
+  return { approvals, asked };
 }
 
 /** The activity log as it currently stands in storage. */
@@ -170,18 +206,22 @@ describe("the trust boundary", () => {
 
   /**
    * 🇪🇸 NOTA: este test usaba `eth_accounts`, que en la Fase 3 ya está
-   * implementado. Se cambia a `eth_requestAccounts` —que llega en la Fase 5—
-   * porque lo que comprueba no es el método concreto: es que la puerta y la
-   * implementación son dos cosas distintas. Un método público sin implementar
-   * tiene que dar 4200 (pasó el control de emisor y cayó por el `default`), no
-   * 4100. Si algún día diera 4100, sería que la frontera está rechazando
-   * métodos públicos y ninguna dApp podría hablar con la wallet.
+   * implementado, y en la Fase 5 le pasó lo mismo a `eth_requestAccounts`. Se
+   * mueve a `eth_sendTransaction` —que llega en la Fase 6— porque lo que
+   * comprueba no es el método concreto: es que la puerta y la implementación son
+   * dos cosas distintas. Un método público sin implementar tiene que dar 4200
+   * (pasó el control de emisor y cayó por el `default`), no 4100. Si algún día
+   * diera 4100, sería que la frontera está rechazando métodos públicos y ninguna
+   * dApp podría hablar con la wallet.
+   *
+   * Que este test tenga que mudarse cada dos fases es buena señal: significa que
+   * la superficie pública se va implementando.
    */
   it("lets a public method through the gate (it just is not implemented yet)", async () => {
     const { dispatch } = setup();
 
     expectError(
-      await dispatch(request("eth_requestAccounts"), pageSender(), RUNTIME_ID),
+      await dispatch(request("eth_sendTransaction"), pageSender(), RUNTIME_ID),
       ErrorCode.UNSUPPORTED_METHOD,
     );
   });
@@ -1092,7 +1132,7 @@ describe("the activity log", () => {
   it("records the call and then the error when a call fails", async () => {
     const { area, dispatch } = setup(LOADED_WALLET);
 
-    await dispatch(request("eth_requestAccounts"), pageSender(), RUNTIME_ID);
+    await dispatch(request("eth_sendTransaction"), pageSender(), RUNTIME_ID);
 
     const entries = logsIn(area);
     expect(entries.map((entry) => entry.level)).toEqual(["call", "error"]);
@@ -1186,5 +1226,481 @@ describe("the activity log", () => {
     const response = await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID);
 
     expect(response.ok).toBe(true);
+  });
+});
+
+// ============================================================================
+// Phase 5 — per-origin permissions
+// ============================================================================
+
+const VERCEL = "https://chrome-wallet.vercel.app";
+const LOCAL = "http://localhost:3000";
+
+function connected(origin: string, accountIndex: number): ConnectedSite {
+  return { origin, accountIndex, connectedAt: 1_000, lastUsedAt: 1_000 };
+}
+
+/** A wallet with two origins already connected to two different accounts. */
+const TWO_CONNECTED = {
+  ...LOADED_WALLET,
+  "cc:connectedSites": {
+    [VERCEL]: connected(VERCEL, 1),
+    [LOCAL]: connected(LOCAL, 0),
+  },
+};
+
+describe("eth_requestAccounts", () => {
+  /**
+   * 🇪🇸 NOTA: un origen ya conectado NO abre ventana. Es lo que hace que
+   * recargar una dApp conectada sea instantáneo y silencioso, en vez de una
+   * ventana de aprobación en cada F5 — que es como se enseña a la gente a
+   * aprobar sin leer.
+   */
+  it("answers a connected origin without opening anything", async () => {
+    const { approvals, asked } = fakeApprovals({ approve: 0 });
+    const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { approvals });
+    const before = area.snapshot();
+
+    const accounts = expectResult<string[]>(
+      await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID),
+    );
+
+    expect(accounts).toEqual([ANVIL_SECOND]);
+    expect(asked).toEqual([]);
+    expect(area.snapshot()["cc:connectedSites"]).toEqual(before["cc:connectedSites"]);
+  });
+
+  it("asks the user when the origin is new, then stores the choice", async () => {
+    const { approvals, asked } = fakeApprovals({ approve: 1 });
+    const { emit, emitted } = recordingEmitter();
+    const { area, dispatch } = setup(LOADED_WALLET, undefined, undefined, { approvals, emit });
+
+    const accounts = expectResult<string[]>(
+      await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID),
+    );
+
+    expect(accounts).toEqual([ANVIL_SECOND]);
+    expect(asked).toHaveLength(1);
+    expect(asked[0].origin).toBe(VERCEL);
+    expect(asked[0].accounts).toEqual([ANVIL_FIRST, ANVIL_SECOND]);
+
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[VERCEL].accountIndex).toBe(1);
+
+    // The other tabs of this origin need telling; the caller already knows.
+    expect(emitted).toEqual([
+      { eventName: "accountsChanged", data: [ANVIL_SECOND], changedOrigin: VERCEL },
+    ]);
+  });
+
+  it("suggests the wallet-wide default account", async () => {
+    const { approvals, asked } = fakeApprovals({ approve: 0 });
+    const { dispatch } = setup(
+      { ...LOADED_WALLET, "cc:defaultAccountIndex": 1 },
+      undefined,
+      undefined,
+      { approvals },
+    );
+
+    await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID);
+
+    expect(asked[0].suggestedAccountIndex).toBe(1);
+  });
+
+  it("passes the tab id through so the window can focus back", async () => {
+    const { approvals, asked } = fakeApprovals({ approve: 0 });
+    const { dispatch } = setup(LOADED_WALLET, undefined, undefined, { approvals });
+
+    await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID);
+
+    expect(asked[0].tabId).toBe(42);
+  });
+
+  it("answers 4001 when the user rejects", async () => {
+    const { approvals } = fakeApprovals({
+      reject: { code: ErrorCode.USER_REJECTED, message: "User rejected the request." },
+    });
+    const { area, dispatch } = setup(LOADED_WALLET, undefined, undefined, { approvals });
+
+    expectError(
+      await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID),
+      ErrorCode.USER_REJECTED,
+    );
+    expect(area.snapshot()["cc:connectedSites"]).toBeUndefined();
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * 4100 AND NOT 4001, AND THE DIFFERENCE IS THE POINT
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: la dApp tiene que poder distinguir "este usuario no tiene wallet
+   * configurada" de "este usuario ha dicho que no", porque la reacción correcta
+   * es distinta: en un caso enseñas "configura tu wallet", en el otro no
+   * enseñas nada y dejas el botón como estaba. Devolver 4001 aquí sería mentir
+   * sobre lo que ha pasado.
+   */
+  it("answers 4100 when there is no wallet, without opening a window", async () => {
+    const { approvals, asked } = fakeApprovals({ approve: 0 });
+    const { dispatch } = setup({}, undefined, undefined, { approvals });
+
+    const response = await dispatch(
+      request("eth_requestAccounts"),
+      pageSender(VERCEL),
+      RUNTIME_ID,
+    );
+
+    expectError(response, ErrorCode.UNAUTHORIZED);
+    if (response.ok) throw new Error("expected a failure");
+    expect(response.error.message).toContain("No wallet");
+    expect(asked).toEqual([]);
+  });
+
+  /** Connected to account 1, then re-imported with one account: ask again. */
+  it("asks again when the stored index no longer fits", async () => {
+    const { approvals, asked } = fakeApprovals({ approve: 0 });
+    const { dispatch } = setup(
+      {
+        "cc:mnemonic": ANVIL_PHRASE,
+        "cc:accounts": [ANVIL_FIRST],
+        "cc:connectedSites": { [VERCEL]: connected(VERCEL, 1) },
+      },
+      undefined,
+      undefined,
+      { approvals },
+    );
+
+    const accounts = expectResult<string[]>(
+      await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID),
+    );
+
+    expect(asked).toHaveLength(1);
+    expect(accounts).toEqual([ANVIL_FIRST]);
+  });
+
+  it("refuses an approved index that is out of range", async () => {
+    const { approvals } = fakeApprovals({ approve: 99 });
+    const { area, dispatch } = setup(LOADED_WALLET, undefined, undefined, { approvals });
+
+    expectError(
+      await dispatch(request("eth_requestAccounts"), pageSender(VERCEL), RUNTIME_ID),
+      ErrorCode.INTERNAL,
+    );
+    expect(area.snapshot()["cc:connectedSites"]).toBeUndefined();
+  });
+
+  it("connects one origin without touching the other", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { area, dispatch } = setup(
+      { ...LOADED_WALLET, "cc:connectedSites": { [VERCEL]: connected(VERCEL, 1) } },
+      undefined,
+      undefined,
+      { approvals },
+    );
+
+    await dispatch(request("eth_requestAccounts"), pageSender(LOCAL), RUNTIME_ID);
+
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[VERCEL].accountIndex).toBe(1);
+    expect(sites[LOCAL].accountIndex).toBe(0);
+  });
+});
+
+describe("wallet_setSiteAccount", () => {
+  /**
+   * ------------------------------------------------------------------------
+   * THE ASYMMETRY, FROM THE OTHER SIDE
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: éste SÍ emite, y solo al origen afectado. Su gemelo
+   * `wallet_setDefaultAccount` no emite nada y ni siquiera lee
+   * `cc:connectedSites` — hay un test estructural desde la Fase 1 que lo fija y
+   * sigue en verde. Si la emisión acabara en el método equivocado, la dApp A se
+   * enteraría de qué cuenta usas en la dApp B.
+   */
+  it("emits to the affected origin and to nobody else", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    const response = await dispatch(
+      request("wallet_setSiteAccount", [{ origin: VERCEL, accountIndex: 0 }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expect(expectResult<null>(response)).toBeNull();
+    expect(emitted).toEqual([
+      { eventName: "accountsChanged", data: [ANVIL_FIRST], changedOrigin: VERCEL },
+    ]);
+
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[VERCEL].accountIndex).toBe(0);
+    // The other origin is untouched.
+    expect(sites[LOCAL].accountIndex).toBe(0);
+  });
+
+  it("keeps connectedAt and moves lastUsedAt", async () => {
+    const { area, dispatch } = setup(TWO_CONNECTED);
+
+    await dispatch(
+      request("wallet_setSiteAccount", [{ origin: VERCEL, accountIndex: 0 }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[VERCEL].connectedAt).toBe(1_000);
+    expect(sites[VERCEL].lastUsedAt).toBeGreaterThan(1_000);
+  });
+
+  it("rejects an origin that is not connected", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    expectError(
+      await dispatch(
+        request("wallet_setSiteAccount", [{ origin: "https://evil.example", accountIndex: 0 }]),
+        uiSender(),
+        RUNTIME_ID,
+      ),
+      ErrorCode.INVALID_PARAMS,
+    );
+    expect(emitted).toEqual([]);
+  });
+
+  it.each([
+    ["an index past the end", 9],
+    ["a negative index", -1],
+    ["a non-integer index", 1.5],
+  ])("rejects %s and emits nothing", async (_label, accountIndex) => {
+    const { emit, emitted } = recordingEmitter();
+    const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    expectError(
+      await dispatch(
+        request("wallet_setSiteAccount", [{ origin: VERCEL, accountIndex }]),
+        uiSender(),
+        RUNTIME_ID,
+      ),
+      ErrorCode.INVALID_PARAMS,
+    );
+    expect(emitted).toEqual([]);
+    expect((area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>)[VERCEL].accountIndex).toBe(1);
+  });
+
+  it("is not reachable from a web page", async () => {
+    const { dispatch } = setup(TWO_CONNECTED);
+
+    expectError(
+      await dispatch(
+        request("wallet_setSiteAccount", [{ origin: VERCEL, accountIndex: 0 }]),
+        pageSender(VERCEL),
+        RUNTIME_ID,
+      ),
+      ErrorCode.UNAUTHORIZED,
+    );
+  });
+});
+
+describe("disconnecting", () => {
+  it("removes the site and tells it with an empty account list", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    await dispatch(
+      request("wallet_disconnectSite", [{ origin: VERCEL }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[VERCEL]).toBeUndefined();
+    expect(sites[LOCAL]).toBeDefined();
+    expect(emitted).toEqual([{ eventName: "accountsChanged", data: [], changedOrigin: VERCEL }]);
+  });
+
+  /**
+   * 🇪🇸 NOTA: `wallet_revokePermissions` es PÚBLICO — deja que una dApp se
+   * desconecte a sí misma, al estilo EIP-2255. Lo importante es que solo puede
+   * desconectarse a SÍ MISMA: el origen sale del `SenderContext`, no de los
+   * params, así que no hay forma de pedirlo para otro sitio.
+   */
+  it("lets a dApp revoke its own permission", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    const response = await dispatch(
+      request("wallet_revokePermissions"),
+      pageSender(VERCEL),
+      RUNTIME_ID,
+    );
+
+    expect(expectResult<null>(response)).toBeNull();
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[VERCEL]).toBeUndefined();
+    expect(sites[LOCAL]).toBeDefined();
+    expect(emitted).toEqual([{ eventName: "accountsChanged", data: [], changedOrigin: VERCEL }]);
+  });
+
+  it("cannot revoke another origin's permission even with params", async () => {
+    const { area, dispatch } = setup(TWO_CONNECTED);
+
+    // The params are ignored entirely: the origin comes from the sender.
+    await dispatch(
+      request("wallet_revokePermissions", [{ origin: LOCAL }]),
+      pageSender(VERCEL),
+      RUNTIME_ID,
+    );
+
+    const sites = area.snapshot()["cc:connectedSites"] as Record<string, ConnectedSite>;
+    expect(sites[LOCAL]).toBeDefined();
+    expect(sites[VERCEL]).toBeUndefined();
+  });
+
+  it("is a silent no-op for an origin that was never connected", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    const response = await dispatch(
+      request("wallet_revokePermissions"),
+      pageSender("https://evil.example"),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(true);
+    expect(emitted).toEqual([]);
+  });
+
+  it("leaves eth_accounts answering [] afterwards", async () => {
+    const { dispatch } = setup(TWO_CONNECTED);
+
+    await dispatch(request("wallet_revokePermissions"), pageSender(VERCEL), RUNTIME_ID);
+
+    expect(
+      expectResult<string[]>(
+        await dispatch(request("eth_accounts"), pageSender(VERCEL), RUNTIME_ID),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("wallet_getConnectedSites", () => {
+  it("lists the connected origins, most recently used first", async () => {
+    const { dispatch } = setup({
+      ...LOADED_WALLET,
+      "cc:connectedSites": {
+        [VERCEL]: { origin: VERCEL, accountIndex: 1, connectedAt: 0, lastUsedAt: 100 },
+        [LOCAL]: { origin: LOCAL, accountIndex: 0, connectedAt: 0, lastUsedAt: 900 },
+      },
+    });
+
+    const sites = expectResult<ConnectedSite[]>(
+      await dispatch(request("wallet_getConnectedSites"), uiSender(), RUNTIME_ID),
+    );
+
+    expect(sites.map((site) => site.origin)).toEqual([LOCAL, VERCEL]);
+  });
+
+  /** A site whose index no longer fits is not connected as far as any dApp is concerned. */
+  it("hides a site whose stored index no longer fits", async () => {
+    const { dispatch } = setup({
+      "cc:mnemonic": ANVIL_PHRASE,
+      "cc:accounts": [ANVIL_FIRST],
+      "cc:connectedSites": { [VERCEL]: connected(VERCEL, 1), [LOCAL]: connected(LOCAL, 0) },
+    });
+
+    const sites = expectResult<ConnectedSite[]>(
+      await dispatch(request("wallet_getConnectedSites"), uiSender(), RUNTIME_ID),
+    );
+
+    expect(sites.map((site) => site.origin)).toEqual([LOCAL]);
+  });
+
+  it("is not reachable from a web page", async () => {
+    const { dispatch } = setup(TWO_CONNECTED);
+
+    expectError(
+      await dispatch(request("wallet_getConnectedSites"), pageSender(VERCEL), RUNTIME_ID),
+      ErrorCode.UNAUTHORIZED,
+    );
+  });
+});
+
+describe("wallet_reset with connected sites", () => {
+  /**
+   * 🇪🇸 NOTA: sin este aviso, cada dApp abierta seguiría enseñando una cuenta
+   * que ya no existe hasta que alguien recargase — la wallet vacía y la web
+   * diciendo que tienes fondos.
+   */
+  it("tells every connected origin before wiping them", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
+
+    expect(emitted).toHaveLength(2);
+    expect(emitted.map((entry) => entry.changedOrigin).sort()).toEqual([LOCAL, VERCEL].sort());
+    expect(emitted.every((entry) => entry.eventName === "accountsChanged")).toBe(true);
+    expect(emitted.every((entry) => Array.isArray(entry.data) && entry.data.length === 0)).toBe(true);
+
+    expect(area.snapshot()["cc:connectedSites"]).toBeUndefined();
+    // Logs still survive a reset.
+    expect(area.keys()).not.toContain("cc:mnemonic");
+  });
+
+  it("emits nothing when no site was connected", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { dispatch } = setup(LOADED_WALLET, undefined, undefined, { emit });
+
+    await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
+
+    expect(emitted).toEqual([]);
+  });
+});
+
+describe("WalletSnapshot.activeSite", () => {
+  it("reports the connected site behind the popup", async () => {
+    const { dispatch } = setup(TWO_CONNECTED, undefined, undefined, {
+      activeOrigin: async () => VERCEL,
+    });
+
+    const snapshot = expectResult<WalletSnapshot>(
+      await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID),
+    );
+
+    expect(snapshot.activeSite?.origin).toBe(VERCEL);
+    expect(snapshot.activeSite?.accountIndex).toBe(1);
+    // The wallet-wide default is a separate thing and stays put.
+    expect(snapshot.defaultAccountIndex).toBe(0);
+  });
+
+  it.each([
+    ["the tab is not a connected site", "https://evil.example"],
+    ["there is no focused tab", null],
+  ])("is null when %s", async (_label, origin) => {
+    const { dispatch } = setup(TWO_CONNECTED, undefined, undefined, {
+      activeOrigin: async () => origin,
+    });
+
+    const snapshot = expectResult<WalletSnapshot>(
+      await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID),
+    );
+
+    expect(snapshot.activeSite).toBeNull();
+  });
+
+  /** The popup must keep working when the tab lookup fails. */
+  it("degrades to null when the active tab cannot be read", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { dispatch } = setup(TWO_CONNECTED, undefined, undefined, {
+      activeOrigin: async () => {
+        throw new Error("tabs exploded");
+      },
+    });
+
+    const snapshot = expectResult<WalletSnapshot>(
+      await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID),
+    );
+
+    expect(snapshot.activeSite).toBeNull();
+    expect(snapshot.accounts).toHaveLength(2);
   });
 });

@@ -24,9 +24,11 @@ import {
   classifySender,
   type Address,
   type BlockTag,
+  type ConnectedSite,
   type Hex,
   type NetworkConfig,
   type Origin,
+  type PendingRequest,
   type RpcRequestMessage,
   type RpcResponseMessage,
   type SenderContext,
@@ -42,8 +44,16 @@ import {
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
 import { appendLog, createLogEntry, redactParams } from "./logs";
+import type { ApprovalCoordinator } from "./approvals";
+import type { EventEmitter } from "./events";
 import { DEFAULT_CHAIN_ID, defaultNetworks } from "./networks";
-import { resolveSiteAccount } from "./sites";
+import {
+  connectSite,
+  disconnectSite,
+  resolveSiteAccount,
+  usableSites,
+  type ConnectedSites,
+} from "./sites";
 import type { WalletStorage } from "./storage";
 
 export interface DispatcherDeps {
@@ -54,6 +64,17 @@ export interface DispatcherDeps {
    */
   fetchBalances?: BalanceReader;
   fetchBalanceAt?: BalanceAtReader;
+  /**
+   * Phase 5. Injected for the same reason as everything else here: a test can
+   * approve or reject a connection without a browser ever opening a window.
+   */
+  approvals?: ApprovalCoordinator;
+  emit?: EventEmitter;
+  /**
+   * The origin of the tab the user is looking at, for WalletSnapshot.activeSite.
+   * Returns null when that is an extension page or nothing at all.
+   */
+  activeOrigin?: () => Promise<Origin | null>;
 }
 
 /** Everything the handlers are allowed to reach. Nothing is a module global. */
@@ -61,7 +82,28 @@ interface HandlerContext {
   storage: WalletStorage;
   fetchBalances: BalanceReader;
   fetchBalanceAt: BalanceAtReader;
+  approvals: ApprovalCoordinator;
+  emit: EventEmitter;
+  activeOrigin: () => Promise<Origin | null>;
 }
+
+/**
+ * 🇪🇸 NOTA: los tres valores por defecto son inertes a propósito. Un test que
+ * solo mira `eth_chainId` no debería tener que construir un coordinador de
+ * aprobaciones; y si un handler acabara usando uno de éstos por accidente, lo
+ * que hace es nada — no abre ventanas, no manda eventos y no inventa un origen
+ * activo. Fallar en silencio es mejor que fallar abriendo una ventana.
+ */
+const NO_APPROVALS: ApprovalCoordinator = {
+  requestConnect: () => Promise.reject(new ProviderError(ProviderErrors.internal(
+    "This wallet build cannot open approval windows.",
+  ))),
+  settle: () => Promise.resolve(),
+  reject: () => Promise.resolve(),
+  read: () => Promise.resolve(null),
+};
+
+const NO_EMIT: EventEmitter = () => Promise.resolve();
 
 export type Dispatcher = (
   message: RpcRequestMessage,
@@ -78,8 +120,18 @@ export function createDispatcher({
   storage,
   fetchBalances = defaultFetchBalances,
   fetchBalanceAt = defaultFetchBalanceAt,
+  approvals = NO_APPROVALS,
+  emit = NO_EMIT,
+  activeOrigin = () => Promise.resolve(null),
 }: DispatcherDeps): Dispatcher {
-  const deps: HandlerContext = { storage, fetchBalances, fetchBalanceAt };
+  const deps: HandlerContext = {
+    storage,
+    fetchBalances,
+    fetchBalanceAt,
+    approvals,
+    emit,
+    activeOrigin,
+  };
 
   return async function dispatch(message, sender, runtimeId) {
     // 1. Who is asking? A null answer means the message did not even come from
@@ -169,19 +221,25 @@ function failure(id: string, error: ReturnType<typeof ProviderErrors.internal>):
  * extremo tirando de él.
  */
 async function handle(
-  { storage, fetchBalances, fetchBalanceAt }: HandlerContext,
+  deps: HandlerContext,
   context: SenderContext,
   method: string,
   params: unknown[],
 ): Promise<unknown> {
+  const { storage, fetchBalances, fetchBalanceAt } = deps;
+
   switch (method) {
-    // ---- Public surface: callable by any web page, no permission needed ----
+    // ---- Public surface: callable by any web page ----
     case "eth_chainId":
       return handleChainId(storage);
     case "eth_accounts":
       return handleAccounts(storage, context.origin);
     case "eth_getBalance":
       return handleGetBalance(storage, fetchBalanceAt, params);
+    case "eth_requestAccounts":
+      return handleRequestAccounts(deps, context);
+    case "wallet_revokePermissions":
+      return handleDisconnect(deps, context.origin);
 
     // ---- Internal surface: extension UI only ----
     case "wallet_createMnemonic":
@@ -189,17 +247,25 @@ async function handle(
     case "wallet_importMnemonic":
       return handleImportMnemonic(storage, params);
     case "wallet_getState":
-      return handleGetState(storage);
+      return handleGetState(deps);
     case "wallet_getBalances":
       return handleGetBalances(storage, fetchBalances, params);
     case "wallet_setDefaultAccount":
       return handleSetDefaultAccount(storage, params);
+    case "wallet_setSiteAccount":
+      return handleSetSiteAccount(deps, params);
+    case "wallet_getConnectedSites":
+      return handleGetConnectedSites(storage);
+    case "wallet_disconnectSite":
+      return handleDisconnect(deps, parseOriginParam(params, "wallet_disconnectSite"));
+    case "wallet_getPendingRequest":
+      return handleGetPendingRequest(deps, params);
     case "wallet_reset":
-      return handleReset(storage);
+      return handleReset(deps);
     default:
-      // Covers the public methods still to come — eth_requestAccounts (phase 5),
-      // eth_sendTransaction and eth_signTypedData_v4 (phase 6),
-      // wallet_switchEthereumChain (phase 8) — and genuine typos.
+      // Covers the public methods still to come — eth_sendTransaction and
+      // eth_signTypedData_v4 (phase 6), wallet_switchEthereumChain and
+      // wallet_addEthereumChain (phase 8) — and genuine typos.
       throw new ProviderError(ProviderErrors.unsupportedMethod(method));
   }
 }
@@ -254,6 +320,107 @@ async function handleGetBalance(
 }
 
 /**
+ * The permission flow. The only public method that can open a window.
+ *
+ * 🇪🇸 NOTA: el orden de las comprobaciones importa y es el que se ve abajo.
+ * Un origen ya conectado NO abre nada — devolver su cuenta directamente es lo
+ * que hace que recargar una dApp conectada sea instantáneo y silencioso, en vez
+ * de una ventana de aprobación en cada F5.
+ */
+async function handleRequestAccounts(
+  { storage, approvals, emit }: HandlerContext,
+  context: SenderContext,
+): Promise<Address[]> {
+  const origin = context.origin;
+  const [sites, accounts, defaultIndex] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:accounts"),
+    storage.get("cc:defaultAccountIndex"),
+  ]);
+
+  const list = accounts ?? [];
+
+  // 1. Already connected, and the stored index still fits.
+  const known = resolveSiteAccount(sites, origin, list.length);
+  if (known !== null) return [list[known]];
+
+  /**
+   * 2. No wallet at all.
+   *
+   * 🇪🇸 NOTA: 4100 y no 4001. La dApp TIENE que poder distinguir "este usuario
+   * no tiene wallet configurada" de "este usuario ha dicho que no", porque la
+   * reacción correcta es distinta: en un caso se enseña "configura tu wallet",
+   * en el otro no se enseña nada y se deja el botón como estaba. Devolver 4001
+   * aquí sería mentir sobre lo que ha pasado, y no se abre ninguna ventana
+   * porque no habría nada que enseñar en ella.
+   */
+  if (list.length === 0) {
+    throw new ProviderError(
+      ProviderErrors.unauthorized("No wallet has been set up in CodeCrypto Wallet yet."),
+    );
+  }
+
+  // 3. Ask the user. Rejects with 4001 if they say no, close the window or wait
+  //    too long — the coordinator owns all three.
+  const accountIndex = await approvals.requestConnect({
+    origin,
+    accounts: list,
+    suggestedAccountIndex: clampAccountIndex(defaultIndex, list.length),
+    ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
+  });
+
+  if (accountIndex < 0 || accountIndex >= list.length) {
+    throw new ProviderError(ProviderErrors.internal("The approved account no longer exists."));
+  }
+
+  const nextSites = connectSite(sites, origin, accountIndex, Date.now());
+  await storage.set("cc:connectedSites", nextSites);
+
+  /**
+   * 🇪🇸 NOTA: se emite `connect` y no `accountsChanged`. La dApp que acaba de
+   * llamar recibe las cuentas por el `return` de su propia promesa; lo que el
+   * evento aporta es avisar a las OTRAS pestañas del mismo origen, que no
+   * llamaron a nada y estarían mostrando "desconectado".
+   */
+  await emit("accountsChanged", [list[accountIndex]], {
+    changedOrigin: origin,
+    connectedSites: nextSites,
+  });
+
+  return [list[accountIndex]];
+}
+
+/**
+ * Drops an origin's permission. Backs both wallet_disconnectSite (from the
+ * popup) and wallet_revokePermissions (from the dApp itself, EIP-2255 style).
+ *
+ * 🇪🇸 NOTA: el mismo handler para los dos porque el efecto es idéntico y la
+ * diferencia está en QUIÉN puede pedirlo, que ya la resuelve
+ * `assertSenderMayCall` una capa más arriba. Duplicarlo sería la vía rápida a
+ * que uno de los dos se olvide de emitir el evento.
+ */
+async function handleDisconnect(
+  { storage, emit }: HandlerContext,
+  origin: Origin,
+): Promise<null> {
+  const sites = await storage.get("cc:connectedSites");
+  if (sites === undefined || !(origin in sites)) return null;
+
+  const nextSites = disconnectSite(sites, origin);
+  await storage.set("cc:connectedSites", nextSites);
+
+  /**
+   * 🇪🇸 NOTA: el evento se emite con el mapa DE ANTES de borrar. `eventTargets`
+   * resuelve los destinatarios consultando `connectedSites`, así que con el mapa
+   * ya limpio el origen recién desconectado no estaría en la lista y nadie
+   * recibiría el aviso — la dApp seguiría creyéndose conectada hasta recargar.
+   */
+  await emit("accountsChanged", [], { changedOrigin: origin, connectedSites: sites });
+
+  return null;
+}
+
+/**
  * Generates a phrase and returns it. Persists NOTHING.
  *
  * 🇪🇸 NOTA: la wallet no existe hasta que el usuario confirma que ha apuntado
@@ -289,13 +456,17 @@ async function handleImportMnemonic(
   return accounts;
 }
 
-async function handleGetState(storage: WalletStorage): Promise<WalletSnapshot> {
-  const [mnemonic, accounts, storedIndex, chainId, networks] = await Promise.all([
+async function handleGetState({
+  storage,
+  activeOrigin,
+}: HandlerContext): Promise<WalletSnapshot> {
+  const [mnemonic, accounts, storedIndex, chainId, networks, sites] = await Promise.all([
     storage.get("cc:mnemonic"),
     storage.get("cc:accounts"),
     storage.get("cc:defaultAccountIndex"),
     storage.get("cc:chainId"),
     storage.get("cc:networks"),
+    storage.get("cc:connectedSites"),
   ]);
 
   const list = accounts ?? [];
@@ -306,9 +477,40 @@ async function handleGetState(storage: WalletStorage): Promise<WalletSnapshot> {
     defaultAccountIndex: clampAccountIndex(storedIndex, list.length),
     chainId: chainId ?? DEFAULT_CHAIN_ID,
     networks: networks ?? defaultNetworks(),
-    // Connected sites arrive in phase 5; until then no origin has an account.
-    activeSite: null,
+    activeSite: await resolveActiveSite(activeOrigin, sites, list.length),
   };
+}
+
+/**
+ * The connected site behind the popup, if the focused tab is one.
+ *
+ * 🇪🇸 NOTA: esto es lo que permite que el popup enseñe LAS DOS cuentas — la
+ * predeterminada de la wallet y la de este sitio — y deje claro cuál cambia cada
+ * control. Sin esa distinción visible, el usuario cambia la cuenta por defecto
+ * esperando que la dApp lo note, no pasa nada, y el modelo por origen parece un
+ * bug en vez de una decisión.
+ *
+ * Un fallo leyendo la pestaña activa devuelve null y ya está: el popup se
+ * degrada a su versión de siempre, que sigue siendo perfectamente usable.
+ */
+async function resolveActiveSite(
+  activeOrigin: () => Promise<Origin | null>,
+  sites: ConnectedSites | undefined,
+  accountCount: number,
+): Promise<ConnectedSite | null> {
+  let origin: Origin | null;
+
+  try {
+    origin = await activeOrigin();
+  } catch (cause) {
+    console.error("[codecrypto] could not resolve the active tab:", cause);
+    return null;
+  }
+
+  if (origin === null) return null;
+  if (resolveSiteAccount(sites, origin, accountCount) === null) return null;
+
+  return sites?.[origin] ?? null;
 }
 
 async function handleGetBalances(
@@ -362,8 +564,100 @@ async function handleSetDefaultAccount(
   return null;
 }
 
-async function handleReset(storage: WalletStorage): Promise<null> {
+/**
+ * Changes the account ONE origin sees, and tells only that origin.
+ *
+ * ---------------------------------------------------------------------------
+ * THE OTHER HALF OF THE ASYMMETRY
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: éste es el gemelo de `wallet_setDefaultAccount`, y la diferencia
+ * entre los dos ES el modelo por origen:
+ *
+ *   wallet_setDefaultAccount → preferencia interna de la wallet. NO emite nada,
+ *                              y ni siquiera lee `cc:connectedSites`. Hay un
+ *                              test estructural desde la Fase 1 que lo fija.
+ *   wallet_setSiteAccount    → vínculo con un sitio concreto. SÍ emite, y solo
+ *                              a las pestañas de ese origen.
+ *
+ * Si la emisión acabara en el método equivocado, la dApp A se enteraría de qué
+ * cuenta usas en la dApp B — que es exactamente la fuga que el modelo existe
+ * para evitar.
+ */
+async function handleSetSiteAccount(
+  { storage, emit }: HandlerContext,
+  params: unknown[],
+): Promise<null> {
+  const { origin, accountIndex } = parseSetSiteAccountParams(params);
+  const [sites, accounts] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:accounts"),
+  ]);
+
+  const list = accounts ?? [];
+
+  if (!(origin in (sites ?? {}))) {
+    throw invalidParams(`"${origin}" is not a connected site.`);
+  }
+  if (!Number.isInteger(accountIndex) || accountIndex < 0 || accountIndex >= list.length) {
+    throw invalidParams(`Account index must be an integer between 0 and ${list.length - 1}.`);
+  }
+
+  const nextSites = connectSite(sites, origin, accountIndex, Date.now());
+  await storage.set("cc:connectedSites", nextSites);
+
+  await emit("accountsChanged", [list[accountIndex]], {
+    changedOrigin: origin,
+    connectedSites: nextSites,
+  });
+
+  return null;
+}
+
+async function handleGetConnectedSites(storage: WalletStorage): Promise<ConnectedSite[]> {
+  const [sites, accounts] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:accounts"),
+  ]);
+
+  // Sites whose index no longer fits are not connected as far as any dApp is
+  // concerned, so the popup must not list them as if they were.
+  return Object.values(usableSites(sites, (accounts ?? []).length)).sort(
+    (a, b) => b.lastUsedAt - a.lastUsedAt,
+  );
+}
+
+async function handleGetPendingRequest(
+  { approvals }: HandlerContext,
+  params: unknown[],
+): Promise<PendingRequest | null> {
+  const [raw] = params;
+  if (typeof raw !== "object" || raw === null) {
+    throw invalidParams("wallet_getPendingRequest expects a single object parameter.");
+  }
+
+  const { requestId } = raw as { requestId?: unknown };
+  if (typeof requestId !== "string" || requestId.length === 0) {
+    throw invalidParams('wallet_getPendingRequest requires a "requestId" string.');
+  }
+
+  return approvals.read(requestId);
+}
+
+/**
+ * 🇪🇸 NOTA: el reset avisa a todos los sitios que estuvieran conectados ANTES de
+ * borrar nada. Sin eso, cada dApp abierta seguiría enseñando una cuenta que ya
+ * no existe hasta que alguien recargara — y la wallet estaría vacía mientras la
+ * web dice que tienes fondos.
+ */
+async function handleReset({ storage, emit }: HandlerContext): Promise<null> {
+  const sites = (await storage.get("cc:connectedSites")) ?? {};
+
   await storage.resetWallet();
+
+  for (const origin of Object.keys(sites)) {
+    await emit("accountsChanged", [], { changedOrigin: origin, connectedSites: sites });
+  }
+
   return null;
 }
 
@@ -475,6 +769,32 @@ function parseGetBalanceParams(params: unknown[]): { address: Address; blockTag:
   throw invalidParams(
     'eth_getBalance expects a block tag of "latest", "pending", "earliest" or a hex block number.',
   );
+}
+
+/** Shared by wallet_disconnectSite. Origins are opaque strings; only the shape is checked. */
+function parseOriginParam(params: unknown[], method: string): Origin {
+  const [raw] = params;
+  if (typeof raw !== "object" || raw === null) {
+    throw invalidParams(`${method} expects a single object parameter.`);
+  }
+
+  const { origin } = raw as { origin?: unknown };
+  if (typeof origin !== "string" || origin.length === 0) {
+    throw invalidParams(`${method} requires an "origin" string.`);
+  }
+
+  return origin;
+}
+
+function parseSetSiteAccountParams(params: unknown[]): { origin: Origin; accountIndex: number } {
+  const origin = parseOriginParam(params, "wallet_setSiteAccount");
+  const { accountIndex } = params[0] as { accountIndex?: unknown };
+
+  if (typeof accountIndex !== "number") {
+    throw invalidParams('wallet_setSiteAccount requires an "accountIndex" number.');
+  }
+
+  return { origin, accountIndex };
 }
 
 function parseSetDefaultAccountParams(params: unknown[]): { accountIndex: number } {
