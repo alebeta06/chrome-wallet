@@ -441,3 +441,215 @@ minutos de popup abierto barrerían el registro entero y enterrarían justo lo q
 las specs 13-16 quieren ver.
 
 La UI que pinta todo esto es la Fase 9. Aquí solo se acumula.
+
+---
+
+# Fase 5 — connect.html y permisos por origen
+
+Requiere `pnpm build` + recargar (↻), Anvil, y la dApp en `localhost:3000`.
+**Esta fase necesita los dos orígenes**: local y `https://chrome-wallet.vercel.app`.
+
+Empieza con la wallet importada (comprobación 1) y sin sitios conectados.
+
+## 22. Conectar por primera vez
+
+En `http://localhost:3000`, sección 3 → **Connect wallet**.
+
+Se abre `connect.html` en su propia ventana. Comprueba, en este orden:
+
+1. **El origen es lo primero y lo más grande**, en monoespaciada:
+   `http://localhost:3000`. Es la única pregunta que el usuario tiene que poder
+   contestar antes de dar acceso — un dominio parecido al esperado es la forma
+   más barata de phishing que hay.
+2. Las 5 cuentas con su saldo, y la **cuenta por defecto preseleccionada**.
+3. Elige la **cuenta 2** y pulsa **Connect**.
+
+La ventana se cierra sola y la dApp muestra la píldora verde con
+`0x3C44…93BC`. Recarga la página: **sigue conectada y no vuelve a preguntar**.
+
+> 🇪🇸 NOTA: que recargar no pida permiso otra vez no es un atajo. Una wallet que
+> abre ventana en cada F5 enseña a la gente a aprobar sin leer, que es
+> exactamente la costumbre que hace que el phishing funcione.
+
+## 23. LA COMPROBACIÓN DE LA FASE — dos orígenes, dos cuentas
+
+Sin desconectar nada, abre `https://chrome-wallet.vercel.app` y conéctala a la
+**cuenta 4** (`0x15d3…6A65`).
+
+Ahora, en cada pestaña, pulsa `eth_accounts`:
+
+| Origen | Esperado |
+|---|---|
+| `http://localhost:3000` | `["0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"]` |
+| `https://chrome-wallet.vercel.app` | `["0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"]` |
+
+**Direcciones distintas, la misma wallet, a la vez.** Y cada una devuelve
+**una sola** cuenta: ninguna de las dos sabe cuántas tienes ni cuáles son las
+otras.
+
+Esto es el modelo por origen. Si las dos devolvieran lo mismo, la fase no está
+hecha por mucho que todo lo demás funcione.
+
+## 24. `accountsChanged` en vivo, y solo a quien le toca
+
+Deja **las dos pestañas abiertas y visibles** (ventanas lado a lado).
+
+Con la pestaña de localhost enfocada, abre el popup. Tiene que aparecer la
+**banda violeta** arriba:
+
+```
+THIS SITE SEES
+http://localhost:3000
+[ 2 · 0x3C44…93BC ▾ ]   Disconnect
+```
+
+Cambia el desplegable de la banda a la **cuenta 0**. Sin tocar nada más:
+
+- La pestaña de **localhost** recibe `accountsChanged` en su panel de eventos y
+  la píldora pasa a `0xf39F…2266`.
+- La pestaña de **Vercel** no recibe nada y sigue en `0x15d3…6A65`.
+
+> 🇪🇸 NOTA: que Vercel no se entere es el punto. Emitir a todos los orígenes
+> filtraría a una dApp qué cuenta usas en la otra — y no rompería nada
+> visiblemente, solo filtraría.
+
+## 25. La asimetría: la lista de abajo NO emite
+
+En el mismo popup, pulsa una cuenta cualquiera de **la lista de abajo**
+(no del desplegable de la banda).
+
+- La marca `default` se mueve.
+- **Ninguna de las dos dApps recibe nada.** El panel de eventos no crece.
+- La banda de arriba **no cambia**: localhost sigue viendo la cuenta que le
+  asignaste.
+
+Esa es la asimetría entera:
+
+| Control | Método | ¿Emite? |
+|---|---|---|
+| Desplegable de la banda | `wallet_setSiteAccount` | Sí, solo a ese origen |
+| Lista de cuentas | `wallet_setDefaultAccount` | No, a nadie |
+
+Si la lista emitiera, la dApp A se enteraría de qué cuenta usas en la dApp B.
+
+## 26. Varias pestañas del mismo origen
+
+Abre **dos** pestañas de `localhost:3000`. Cambia la cuenta del sitio desde el
+popup.
+
+**Las dos** tienen que actualizarse. Si solo cambia una, alguien se quedó con
+`tabs[0]` en vez de recorrer todas — y la wallet estaría diciendo una cosa
+mientras una de las pestañas dice otra.
+
+## 27. Cerrar la ventana con la X
+
+Desconecta localhost, y vuelve a pulsar **Connect wallet**. Cuando se abra
+`connect.html`, **ciérrala con la X** sin decidir.
+
+La dApp tiene que recibir **4001** y volver al botón de conectar, sin banner
+rojo y sin quedarse colgada.
+
+> 🇪🇸 NOTA: eso lo detecta el puerto keep-alive al caer, no
+> `chrome.windows.onRemoved`. El puerto cubre además que la página crashee o
+> navegue: en los tres casos muere igual.
+
+Prueba también **Reject**: mismo 4001, misma ausencia de ruido.
+
+## 28. El service worker se duerme con la ventana abierta
+
+El caso que el puerto existe para resolver:
+
+1. Pulsa **Connect wallet**.
+2. Con `connect.html` abierta, deja pasar **45–60 s** mirando
+   `chrome://extensions`. El service worker **NO** debe pasar a inactivo.
+3. Aprueba.
+
+La conexión se completa y la dApp recibe su cuenta. Si el worker se hubiera
+dormido, la promesa habría muerto y la dApp se habría comido un 4900.
+
+## 29. Timeout de 60 s
+
+Pulsa **Connect wallet** y no toques nada durante **más de 60 s**.
+
+La ventana se cierra sola y la dApp recibe **4001** con el mensaje de timeout.
+Para la dApp es indistinguible de un rechazo, que es lo correcto: en los dos
+casos no hay conexión y no hay nada que enseñar.
+
+## 30. Dos peticiones seguidas → una sola ventana
+
+Con localhost desconectado, en su consola:
+
+```js
+// Descubre la wallet como lo haría una dApp, por EIP-6963.
+const detail = await new Promise((resolve) => {
+  window.addEventListener('eip6963:announceProvider', (event) => {
+    if (event.detail.info.rdns === 'academy.codecrypto.wallet') resolve(event.detail)
+  })
+  window.dispatchEvent(new Event('eip6963:requestProvider'))
+})
+
+// Dos llamadas seguidas, sin esperar a la primera.
+const a = detail.provider.request({ method: 'eth_requestAccounts' })
+const b = detail.provider.request({ method: 'eth_requestAccounts' })
+
+// Tras aprobar en la ventana:
+console.log(await a, await b)   // la misma cuenta en las dos
+```
+
+Se abre **una sola** ventana. Al aprobar, **las dos** promesas se resuelven con
+la misma cuenta.
+
+> 🇪🇸 NOTA: no es un caso rebuscado — React en StrictMode monta dos veces en
+> desarrollo, así que una dApp llamando dos veces seguidas es lo normal. Dos
+> ventanas obligarían a decidir dos veces y dejarían una huérfana.
+
+## 31. Desconectar desde los dos lados
+
+- **Desde la dApp:** botón **Disconnect** (`wallet_revokePermissions`). La
+  píldora desaparece, llega `accountsChanged` con `[]`, y `eth_accounts` vuelve
+  a `[]`.
+- **Desde el popup:** sección **Connected sites** → **Disconnect**. Mismo
+  efecto, y el otro origen sigue conectado.
+
+Una dApp solo puede revocarse **a sí misma**: el origen sale del emisor del
+mensaje, no de los params, así que no hay forma de pedirlo para otro sitio.
+
+## 32. Reset con sitios conectados
+
+Con los dos orígenes conectados y sus pestañas abiertas, pulsa **Reset** en el
+popup.
+
+Las **dos** dApps reciben `accountsChanged` con `[]` a la vez. Sin ese aviso,
+cada una seguiría enseñando una cuenta que ya no existe hasta que alguien
+recargara — la wallet vacía y la web diciendo que tienes fondos.
+
+## 33. Índice fuera de rango tras reimportar
+
+1. Conecta localhost a la **cuenta 4**.
+2. Reset, y reimporta la frase de Anvil con **2 cuentas**.
+
+`eth_accounts` en localhost devuelve **`[]`**, y **Connect wallet** vuelve a
+abrir la ventana.
+
+> 🇪🇸 NOTA: acotar a la cuenta 0 habría sido más cómodo y peor. La dApp enseñaba
+> "tu cuenta es 0x15d3…" y pasaría a operar como 0xf39F… sin decírselo a nadie.
+> Sustituir una identidad en silencio es exactamente el fallo que el modelo por
+> origen existe para no tener.
+>
+> (En la práctica `wallet_reset` ya limpia `cc:connectedSites`, así que para
+> forzar el caso hay que editar storage a mano — pero la defensa vale igual.)
+
+## 34. Ninguna web puede aprobarse sola
+
+En la consola de `localhost:3000`, con una conexión pendiente:
+
+```js
+chrome.runtime.sendMessage('<TU_ID>', {
+  type: 'CODECRYPTO_DECISION', requestId: '<el-id>', kind: 'connect',
+  approved: true, accountIndex: 0,
+})
+```
+
+No debe conectar nada. El background solo acepta decisiones de sus **propias**
+páginas; si no, cualquier web se saltaría la ventana entera — que es justo el
+permiso que esta fase existe para pedir.
