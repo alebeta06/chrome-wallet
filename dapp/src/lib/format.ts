@@ -72,3 +72,23 @@ export function looksLikeAddress(value: string): boolean {
 export function isHexQuantity(value: unknown): value is string {
   return typeof value === "string" && HEX_QUANTITY.test(value);
 }
+
+/**
+ * An ETH amount typed by a human, to a wei hex quantity. null when unusable.
+ *
+ * 🇪🇸 NOTA: se parte la cadena por el punto y se rellena a 18 dígitos en vez de
+ * multiplicar por 10^18 en coma flotante. `0.1 * 1e18` da 100000000000000000 —
+ * que parece bien— pero `2.675 * 1e18` da 2674999999999999700: la wallet
+ * enviaría una cantidad distinta de la que el usuario escribió, y por un error
+ * que solo aparece con ciertos decimales.
+ */
+export function toWeiHex(amount: string): string | null {
+  const trimmed = amount.trim();
+  if (!/^\d*\.?\d*$/.test(trimmed) || trimmed === "" || trimmed === ".") return null;
+
+  const [whole = "0", fraction = ""] = trimmed.split(".");
+  if (fraction.length > ETH_DECIMALS) return null;
+
+  const wei = BigInt(whole) * WEI_PER_ETH + BigInt(fraction.padEnd(ETH_DECIMALS, "0") || "0");
+  return `0x${wei.toString(16)}`;
+}

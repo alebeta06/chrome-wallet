@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { formatEther, isHexQuantity, looksLikeAddress, shortenAddress } from "@/lib/format";
+import { formatEther, isHexQuantity, looksLikeAddress, shortenAddress, toWeiHex } from "@/lib/format";
+import { explorerTxUrl } from "@/lib/networks";
 
 const ANVIL_FIRST = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
@@ -110,5 +111,78 @@ describe("isHexQuantity", () => {
     ["an array", []],
   ])("rejects %s", (_label, value) => {
     expect(isHexQuantity(value)).toBe(false);
+  });
+});
+
+describe("toWeiHex", () => {
+  it("converts whole amounts", () => {
+    expect(toWeiHex("1")).toBe("0xde0b6b3a7640000");
+    expect(toWeiHex("0")).toBe("0x0");
+  });
+
+  it("converts fractions", () => {
+    // 0.001 ETH
+    expect(toWeiHex("0.001")).toBe("0x38d7ea4c68000");
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * WHY THIS IS NOT amount * 1e18
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: `2.675 * 1e18` en coma flotante da 2674999999999999700, no
+   * 2675000000000000000. La wallet enviaría una cantidad DISTINTA de la que el
+   * usuario escribió, por un error que solo aparece con ciertos decimales — así
+   * que pasa las pruebas a ojo y falla con el número de alguien.
+   */
+  it("does not lose precision the way floating point would", () => {
+    expect(toWeiHex("2.675")).toBe(`0x${(2675000000000000000n).toString(16)}`);
+    expect(BigInt(toWeiHex("2.675")!)).toBe(2675000000000000000n);
+  });
+
+  it("accepts the full 18 decimals", () => {
+    expect(BigInt(toWeiHex("0.000000000000000001")!)).toBe(1n);
+  });
+
+  it("round-trips through formatEther for four-decimal amounts", () => {
+    for (const amount of ["1", "0.5", "12.25", "0.0001"]) {
+      expect(formatEther(toWeiHex(amount)!)).toBe(Number(amount).toFixed(4));
+    }
+  });
+
+  it.each([
+    ["empty", ""],
+    ["just a dot", "."],
+    ["letters", "1e18"],
+    ["a negative", "-1"],
+    ["two dots", "1.2.3"],
+    ["more than 18 decimals", "0.0000000000000000001"],
+    ["hex", "0x1"],
+  ])("refuses %s", (_label, amount) => {
+    expect(toWeiHex(amount)).toBeNull();
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    expect(toWeiHex("  1.5  ")).toBe(toWeiHex("1.5"));
+  });
+});
+
+describe("explorerTxUrl", () => {
+  it("links to etherscan for the chains that have one", () => {
+    expect(explorerTxUrl("0xaa36a7", "0xhash")).toBe("https://sepolia.etherscan.io/tx/0xhash");
+    expect(explorerTxUrl("0x1", "0xhash")).toBe("https://etherscan.io/tx/0xhash");
+  });
+
+  /**
+   * 🇪🇸 NOTA: Anvil es local y no tiene explorador. Un enlace roto es peor que
+   * no ofrecer enlace: el usuario lo pulsa, ve un 404 y se pregunta si la
+   * transacción ha fallado.
+   */
+  it("offers no link for a local chain", () => {
+    expect(explorerTxUrl("0x7a69", "0xhash")).toBeNull();
+  });
+
+  it("offers no link when the chain is unknown", () => {
+    expect(explorerTxUrl(null, "0xhash")).toBeNull();
+    expect(explorerTxUrl("0xdead", "0xhash")).toBeNull();
   });
 });

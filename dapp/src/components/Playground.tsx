@@ -2,23 +2,26 @@
 
 import { useEffect, useState } from "react";
 
-import { EventLog } from "@/components/EventLog";
 import { ConnectPanel } from "@/components/ConnectPanel";
+import { EventLog } from "@/components/EventLog";
 import { MethodPanel } from "@/components/MethodPanel";
 import { NoWalletsEmptyState } from "@/components/NoWalletsEmptyState";
 import { ProviderCard } from "@/components/ProviderCard";
+import { SendPanel } from "@/components/SendPanel";
 import { WalletPicker } from "@/components/WalletPicker";
 import { requestProviders, useProviders } from "@/hooks/useProviders";
 import { useProviderEvents } from "@/hooks/useProviderEvents";
-import { CODECRYPTO_RDNS } from "@/types/eip1193";
+import { useWalletSession } from "@/hooks/useWalletSession";
+import { CODECRYPTO_RDNS, type EIP6963ProviderDetail } from "@/types/eip1193";
 
 /**
- * Everything that needs a browser lives under here.
+ * Discovery and the wallet picker. Everything that needs a chosen provider
+ * lives in <Session>, below.
  *
- * 🇪🇸 NOTA: `page.tsx` se queda como componente de servidor con el texto de la
- * cabecera, y solo esto es cliente. Así la página tiene HTML real antes de que
- * hidrate: quien la abra sin JavaScript, o mientras carga, ve de qué va en vez
- * de un hueco en blanco.
+ * 🇪🇸 NOTA: la separación no es estética. `useWalletSession` y
+ * `useProviderEvents` necesitan un provider, y un hook no se puede llamar
+ * condicionalmente — así que la rama "no hay wallet" tiene que salir antes de
+ * que exista el componente que los usa.
  */
 export function Playground() {
   const providers = useProviders();
@@ -26,13 +29,8 @@ export function Playground() {
 
   /**
    * 🇪🇸 NOTA: la preselección se hace en un efecto y no durante el render. Las
-   * wallets llegan de forma asíncrona (el anuncio de EIP-6963 puede tardar unos
-   * milisegundos), así que en el primer render la lista está vacía y no hay
-   * nada que elegir. Elegir durante el render sería además un `setState` en
-   * render, que React castiga con un aviso.
-   *
-   * Se prefiere CodeCrypto si está: es la wallet de este proyecto y la página
-   * existe para probarla. Si no, la primera que haya anunciado.
+   * wallets llegan de forma asíncrona, así que en el primer render la lista está
+   * vacía y no hay nada que elegir.
    */
   useEffect(() => {
     if (selectedRdns !== null || providers.length === 0) return;
@@ -41,17 +39,6 @@ export function Playground() {
     setSelectedRdns((ours ?? providers[0]).info.rdns);
   }, [providers, selectedRdns]);
 
-  const selected = providers.find((entry) => entry.info.rdns === selectedRdns) ?? null;
-  const events = useProviderEvents(selected?.provider ?? null);
-
-  /**
-   * 🇪🇸 NOTA: cada `accountsChanged` que llega hace que el panel de conexión
-   * relea `eth_accounts`. Es lo que hace visible el modelo por origen: cambias
-   * la cuenta de este sitio desde el popup y la página se actualiza sola, sin
-   * recargar y sin que la otra dApp se entere de nada.
-   */
-  const accountsRevision = events.filter((event) => event.name === "accountsChanged").length;
-
   if (providers.length === 0) {
     return (
       <section className="section">
@@ -59,6 +46,8 @@ export function Playground() {
       </section>
     );
   }
+
+  const selected = providers.find((entry) => entry.info.rdns === selectedRdns) ?? null;
 
   return (
     <>
@@ -78,53 +67,93 @@ export function Playground() {
         />
       </section>
 
-      {selected !== null && (
-        <>
-          <section className="section">
-            <h2 className="section-title">2 · Selected wallet</h2>
-            <ProviderCard info={selected.info} />
-          </section>
+      {selected !== null && <Session key={selected.info.rdns} detail={selected} />}
+    </>
+  );
+}
 
-          <section className="section">
-            <h2 className="section-title">3 · Connection</h2>
-            <p className="section-note">
-              <code>eth_requestAccounts</code> asks the wallet for permission. The account
-              you approve is bound to <strong>this origin only</strong> — the same wallet
-              can be on a different account for a different site, at the same time.
-            </p>
-            <ConnectPanel provider={selected.provider} accountsRevision={accountsRevision} />
-          </section>
+function Session({ detail }: { detail: EIP6963ProviderDetail }) {
+  const events = useProviderEvents(detail.provider);
 
-          <section className="section">
-            <h2 className="section-title">4 · Public methods (no permission required)</h2>
-            <p className="section-note">
-              These the wallet answers without any approval. Everything else answers{" "}
-              <code>4200</code> until the phase that implements it.
-            </p>
-            <MethodPanel provider={selected.provider} accountsRevision={accountsRevision} />
-          </section>
+  /**
+   * 🇪🇸 NOTA: cada evento de cuenta o de red hace que se relea la sesión. Es lo
+   * que hace visible el modelo por origen: cambias la cuenta de este sitio desde
+   * el popup y la página se actualiza sola, sin recargar y sin que la otra dApp
+   * se entere de nada.
+   */
+  const revision = events.filter(
+    (event) => event.name === "accountsChanged" || event.name === "chainChanged",
+  ).length;
 
-          <section className="section">
-            <h2 className="section-title">5 · Provider events</h2>
-            <p className="section-note">
-              Live <code>accountsChanged</code>, <code>chainChanged</code>,{" "}
-              <code>connect</code> and <code>disconnect</code>, wired now so the channel is
-              tested before there is anything to send down it.
-            </p>
-            <EventLog events={events} />
-          </section>
+  const session = useWalletSession(detail.provider, revision);
 
-          <section className="section">
-            <h2 className="section-title">6 · Injection inside an iframe</h2>
-            <p className="section-note">
-              The extension declares <code>all_frames</code> because plenty of dApps live
-              inside an iframe, and a wallet that only injects into the top frame does not
-              exist for them. This embeds <code>/frame</code> to check it.
-            </p>
-            <iframe className="frame-embed" src="/frame" title="Frame injection probe" data-testid="iframe" />
-          </section>
-        </>
-      )}
+  return (
+    <>
+      <section className="section">
+        <h2 className="section-title">2 · Selected wallet</h2>
+        <ProviderCard info={detail.info} />
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">3 · Connection</h2>
+        <p className="section-note">
+          <code>eth_requestAccounts</code> asks the wallet for permission. The account you
+          approve is bound to <strong>this origin only</strong> — the same wallet can be on a
+          different account for a different site, at the same time.
+        </p>
+        <ConnectPanel
+          provider={detail.provider}
+          account={session.account}
+          onAccount={session.setAccount}
+        />
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">4 · Send a transaction</h2>
+        <p className="section-note">
+          <code>eth_sendTransaction</code> opens an approval window. The wallet signs in its
+          service worker — this page never sees a key, and the <code>from</code> it accepts
+          is the account you granted to this origin and no other.
+        </p>
+        <SendPanel
+          provider={detail.provider}
+          account={session.account}
+          chainId={session.chainId}
+        />
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">5 · Public methods (no permission required)</h2>
+        <p className="section-note">
+          These the wallet answers without any approval. Everything else answers{" "}
+          <code>4200</code> until the phase that implements it.
+        </p>
+        <MethodPanel provider={detail.provider} accountsRevision={revision} />
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">6 · Provider events</h2>
+        <p className="section-note">
+          Live <code>accountsChanged</code>, <code>chainChanged</code>, <code>connect</code>{" "}
+          and <code>disconnect</code>.
+        </p>
+        <EventLog events={events} />
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">7 · Injection inside an iframe</h2>
+        <p className="section-note">
+          The extension declares <code>all_frames</code> because plenty of dApps live inside
+          an iframe, and a wallet that only injects into the top frame does not exist for
+          them. This embeds <code>/frame</code> to check it.
+        </p>
+        <iframe
+          className="frame-embed"
+          src="/frame"
+          title="Frame injection probe"
+          data-testid="iframe"
+        />
+      </section>
     </>
   );
 }

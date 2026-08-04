@@ -49,3 +49,22 @@ export function describeChain(chainId: unknown): ChainDescription {
     known,
   };
 }
+
+const EXPLORERS: Readonly<Record<string, string>> = {
+  "0x1": "https://etherscan.io",
+  "0xaa36a7": "https://sepolia.etherscan.io",
+  // Anvil is local and has no explorer, which is why this map has a hole in it.
+};
+
+/**
+ * A link to the transaction, when the network has somewhere to link to.
+ *
+ * 🇪🇸 NOTA: devuelve null para Anvil a propósito. Un enlace roto a un explorador
+ * que no existe es peor que no ofrecer enlace: el usuario lo pulsa, ve un 404 y
+ * se pregunta si la transacción ha fallado.
+ */
+export function explorerTxUrl(chainId: string | null, hash: string): string | null {
+  if (chainId === null) return null;
+  const base = EXPLORERS[chainId.toLowerCase()];
+  return base === undefined ? null : `${base}/tx/${hash}`;
+}
