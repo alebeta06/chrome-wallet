@@ -11,7 +11,11 @@ import {
   type SerializedProviderError,
   type WalletSnapshot,
 } from "@/types/messages";
-import type { ApprovalCoordinator, ConnectRequestInput } from "@/lib/approvals";
+import type {
+  ApprovalCoordinator,
+  ConnectRequestInput,
+  SignatureRequestInput,
+} from "@/lib/approvals";
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
@@ -120,6 +124,7 @@ function recordingEmitter() {
 /** An approval coordinator whose answer the test decides up front. */
 function fakeApprovals(outcome: { approve: number } | { reject: SerializedProviderError }) {
   const asked: ConnectRequestInput[] = [];
+  const signed: SignatureRequestInput[] = [];
 
   const approvals: ApprovalCoordinator = {
     requestConnect: async (input) => {
@@ -127,12 +132,16 @@ function fakeApprovals(outcome: { approve: number } | { reject: SerializedProvid
       if ("approve" in outcome) return outcome.approve;
       throw new ProviderError(outcome.reject);
     },
+    requestSignature: async (input) => {
+      signed.push(input);
+      if (!("approve" in outcome)) throw new ProviderError(outcome.reject);
+    },
     settle: async () => {},
     reject: async () => {},
     read: async () => null,
   };
 
-  return { approvals, asked };
+  return { approvals, asked, signed };
 }
 
 /** The activity log as it currently stands in storage. */

@@ -94,10 +94,14 @@ interface HandlerContext {
  * que hace es nada — no abre ventanas, no manda eventos y no inventa un origen
  * activo. Fallar en silencio es mejor que fallar abriendo una ventana.
  */
+const noApprovalWindows = (): Promise<never> =>
+  Promise.reject(
+    new ProviderError(ProviderErrors.internal("This wallet build cannot open approval windows.")),
+  );
+
 const NO_APPROVALS: ApprovalCoordinator = {
-  requestConnect: () => Promise.reject(new ProviderError(ProviderErrors.internal(
-    "This wallet build cannot open approval windows.",
-  ))),
+  requestConnect: noApprovalWindows,
+  requestSignature: noApprovalWindows,
   settle: () => Promise.resolve(),
   reject: () => Promise.resolve(),
   read: () => Promise.resolve(null),

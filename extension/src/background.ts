@@ -192,8 +192,14 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
       return false;
     }
 
+    /**
+     * 🇪🇸 NOTA: se le pasa el mensaje ENTERO al coordinador en vez de extraer
+     * aquí lo que necesita. Una firma aprobada no lleva índice de cuenta y una
+     * conexión sí; desempaquetarlo en el background obligaría a este listener a
+     * conocer la forma de cada tipo de aprobación, y a crecer con cada fase.
+     */
     void (message.approved
-      ? approvals.settle(message.requestId, message.kind === "connect" ? message.accountIndex : 0)
+      ? approvals.settle(message.requestId, message)
       : approvals.reject(message.requestId, message.error));
 
     return false;
