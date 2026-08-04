@@ -46,6 +46,7 @@ import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
 import { appendLog, createLogEntry, redactParams } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
+import type { TransactionSender } from "./signer";
 import { DEFAULT_CHAIN_ID, defaultNetworks } from "./networks";
 import {
   connectSite,
@@ -55,6 +56,7 @@ import {
   type ConnectedSites,
 } from "./sites";
 import type { WalletStorage } from "./storage";
+import { parseTransactionRequest } from "./tx";
 
 export interface DispatcherDeps {
   storage: WalletStorage;
@@ -70,6 +72,8 @@ export interface DispatcherDeps {
    */
   approvals?: ApprovalCoordinator;
   emit?: EventEmitter;
+  /** Phase 6. Injected so the signing path is testable without a node. */
+  sender?: TransactionSender;
   /**
    * The origin of the tab the user is looking at, for WalletSnapshot.activeSite.
    * Returns null when that is an extension page or nothing at all.
@@ -84,6 +88,7 @@ interface HandlerContext {
   fetchBalanceAt: BalanceAtReader;
   approvals: ApprovalCoordinator;
   emit: EventEmitter;
+  sender: TransactionSender;
   activeOrigin: () => Promise<Origin | null>;
 }
 
@@ -109,6 +114,15 @@ const NO_APPROVALS: ApprovalCoordinator = {
 
 const NO_EMIT: EventEmitter = () => Promise.resolve();
 
+const NO_SENDER: TransactionSender = {
+  send: () =>
+    Promise.reject(
+      new ProviderError(ProviderErrors.internal("This wallet build cannot send transactions.")),
+    ),
+  // Null is the "could not estimate" answer the approval window already handles.
+  estimate: () => Promise.resolve(null),
+};
+
 export type Dispatcher = (
   message: RpcRequestMessage,
   sender: chrome.runtime.MessageSender,
@@ -126,6 +140,7 @@ export function createDispatcher({
   fetchBalanceAt = defaultFetchBalanceAt,
   approvals = NO_APPROVALS,
   emit = NO_EMIT,
+  sender = NO_SENDER,
   activeOrigin = () => Promise.resolve(null),
 }: DispatcherDeps): Dispatcher {
   const deps: HandlerContext = {
@@ -134,6 +149,7 @@ export function createDispatcher({
     fetchBalanceAt,
     approvals,
     emit,
+    sender,
     activeOrigin,
   };
 
@@ -244,6 +260,8 @@ async function handle(
       return handleRequestAccounts(deps, context);
     case "wallet_revokePermissions":
       return handleDisconnect(deps, context.origin);
+    case "eth_sendTransaction":
+      return handleSendTransaction(deps, context, params);
 
     // ---- Internal surface: extension UI only ----
     case "wallet_createMnemonic":
@@ -392,6 +410,80 @@ async function handleRequestAccounts(
   });
 
   return [list[accountIndex]];
+}
+
+/**
+ * Signs and sends a transaction, after the user says so.
+ *
+ * ---------------------------------------------------------------------------
+ * THE ORDER OF THE CHECKS IS THE DESIGN
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: todo lo que puede rechazarse SIN molestar al usuario se rechaza
+ * antes de abrir nada — no conectado, params malformados, `from` de otra cuenta,
+ * red desconocida. Una ventana de firma que aparece para algo que la wallet ya
+ * sabe que va a rechazar enseña a la gente a cerrar ventanas sin leerlas, y esa
+ * costumbre es lo que hace que el phishing funcione.
+ */
+async function handleSendTransaction(
+  deps: HandlerContext,
+  context: SenderContext,
+  params: unknown[],
+): Promise<Hex> {
+  const { storage, approvals, sender } = deps;
+  const origin = context.origin;
+
+  const [sites, accounts] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:accounts"),
+  ]);
+
+  const list = accounts ?? [];
+  const accountIndex = resolveSiteAccount(sites, origin, list.length);
+
+  if (accountIndex === null) {
+    throw new ProviderError(
+      ProviderErrors.unauthorized("Connect to this wallet before sending a transaction."),
+    );
+  }
+
+  // Throws -32602 for a malformed request, or 4100 for someone else's account.
+  const transaction = parseTransactionRequest(params, list[accountIndex]);
+  const network = await resolveActiveNetwork(storage);
+
+  /**
+   * 🇪🇸 NOTA: se estima ANTES de abrir la ventana y el resultado se mete en la
+   * propia transacción. Así lo que la ventana enseña es exactamente lo que se va
+   * a firmar —mismo gas, mismas fees— y no una estimación que podría diferir de
+   * la definitiva. Si falla, los campos se quedan sin poner y la ventana dice
+   * que no pudo estimar en vez de inventarse un número.
+   */
+  const estimate = await sender.estimate({ network, transaction });
+  const prepared = estimate === null ? transaction : { ...transaction, ...estimate };
+
+  await approvals.requestSignature({
+    origin,
+    method: "eth_sendTransaction",
+    // The PARSED transaction, not what the dApp sent: the window must render the
+    // authorised `from`, never the one the page claimed.
+    params: [prepared],
+    chainId: network.chainId,
+    accountIndex,
+    ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
+  });
+
+  /**
+   * 🇪🇸 NOTA: el mnemonic se lee DESPUÉS de la aprobación y no antes. No cambia
+   * nada de seguridad —el background podría leerlo cuando quisiera— pero
+   * mantiene la frase fuera de memoria durante los hasta 120 s que el usuario
+   * puede tardar en decidir, que es la ventana en la que un volcado de memoria
+   * del worker sería más probable.
+   */
+  const phrase = await storage.get("cc:mnemonic");
+  if (phrase === undefined || phrase.length === 0) {
+    throw new ProviderError(ProviderErrors.internal("The wallet has no key to sign with."));
+  }
+
+  return sender.send({ network, phrase, accountIndex, transaction: prepared });
 }
 
 /**

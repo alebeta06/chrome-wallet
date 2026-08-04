@@ -12,13 +12,16 @@ import {
   ProviderErrors,
   parseApprovalPortName,
   type Origin,
+  type PendingKind,
   type RequestId,
   type RuntimeMessage,
 } from "@/types/messages";
 
 import { createApprovalCoordinator, type ApprovalWindows } from "@/lib/approvals";
+import { pendingBadgeText } from "@/lib/badge";
 import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
+import { createTransactionSender } from "@/lib/signer";
 import { createWalletStorage, type WalletStorage } from "@/lib/storage";
 
 const storage = createWalletStorage();
@@ -39,11 +42,39 @@ const tabs: TabsPort = {
   sendMessage: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
 };
 
-const APPROVAL_WINDOW = { width: 420, height: 640 } as const;
+const APPROVAL_WINDOW = { width: 420, height: 660 } as const;
+
+/** Which surface renders each kind of request. */
+const APPROVAL_PAGE: Record<PendingKind, string> = {
+  connect: "connect.html",
+  signature: "notification.html",
+  // Phase 8. Until then nothing creates one, so this is never reached.
+  "add-chain": "notification.html",
+};
+
+const NOTIFICATION_TEXT: Record<PendingKind, { title: string; message: string }> = {
+  connect: { title: "Connection request", message: "A site wants to connect to your wallet." },
+  signature: { title: "Signature request", message: "A site is asking you to sign a transaction." },
+  "add-chain": { title: "Network request", message: "A site wants to add a network." },
+};
+
+/**
+ * 🇪🇸 NOTA: PNG, nunca el SVG. `chrome.notifications` falla EN SILENCIO con un
+ * SVG — sin excepción, sin notificación y sin nada en consola. Los PNG los
+ * genera `pnpm icons` desde la Fase 0 y están en `dist/icons/`.
+ */
+const NOTIFICATION_ICON = "icons/icon-128.png";
 
 const windows: ApprovalWindows = {
-  async open(requestId: RequestId) {
-    const url = `${chrome.runtime.getURL("connect.html")}?requestId=${encodeURIComponent(requestId)}`;
+  /**
+   * 🇪🇸 NOTA: aquí se abre la ventana Y se dispara la notificación de escritorio.
+   * No es mezclar dos cosas: este método es "preséntale esto al usuario", y es
+   * el único punto que se ejecuta exactamente una vez por solicitud nueva.
+   * Colgar la notificación de un listener de storage la repetiría en cada cambio.
+   */
+  async open(requestId: RequestId, kind: PendingKind) {
+    const page = APPROVAL_PAGE[kind];
+    const url = `${chrome.runtime.getURL(page)}?requestId=${encodeURIComponent(requestId)}`;
 
     const created = await chrome.windows.create({
       url,
@@ -52,6 +83,8 @@ const windows: ApprovalWindows = {
       ...APPROVAL_WINDOW,
     });
 
+    notify(requestId, kind);
+
     return created?.id;
   },
 
@@ -59,6 +92,19 @@ const windows: ApprovalWindows = {
     await chrome.windows.remove(windowId);
   },
 };
+
+function notify(requestId: RequestId, kind: PendingKind): void {
+  const { title, message } = NOTIFICATION_TEXT[kind];
+
+  // Fire and forget: a wallet that cannot show a toast still works perfectly.
+  chrome.notifications.create(`codecrypto:${requestId}`, {
+    type: "basic",
+    iconUrl: NOTIFICATION_ICON,
+    title,
+    message,
+    priority: 2,
+  });
+}
 
 /**
  * The origin of the tab the user is looking at, for WalletSnapshot.activeSite.
@@ -86,9 +132,48 @@ async function activeOrigin(): Promise<Origin | null> {
 
 const approvals = createApprovalCoordinator({ storage, windows });
 const emit = createEventEmitter(tabs);
-const dispatch = createDispatcher({ storage, approvals, emit, activeOrigin });
+const sender = createTransactionSender();
+const dispatch = createDispatcher({ storage, approvals, emit, sender, activeOrigin });
 
 console.log(`[${PROTOCOL}] background service worker alive`);
+
+// ============================================================================
+// The badge (spec 32)
+// ============================================================================
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE BADGE IS DERIVED, NOT COUNTED
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: no hay ningún contador que sumar y restar. Se recalcula desde
+ * `cc:pendingRequests` en dos momentos, y con esos dos basta:
+ *
+ *   - al arrancar el worker, que es lo que lo deja correcto DESPUÉS DE DORMIR;
+ *   - en cada cambio de esa clave, que cubre crear, resolver y caducar sin que
+ *     ninguna rama tenga que acordarse de avisar.
+ *
+ * Un contador en memoria fallaría exactamente en el caso que más importa: el
+ * usuario tiene una ventana de aprobación abierta, el worker se duerme, y al
+ * despertar el badge dice que no hay nada pendiente.
+ */
+async function refreshBadge(): Promise<void> {
+  const text = pendingBadgeText(await storage.get("cc:pendingRequests"), Date.now());
+
+  await chrome.action.setBadgeText({ text });
+  if (text.length > 0) await chrome.action.setBadgeBackgroundColor({ color: "#7c5cff" });
+}
+
+void refreshBadge().catch((cause: unknown) => {
+  console.error(`[${PROTOCOL}] could not restore the badge:`, cause);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || changes["cc:pendingRequests"] === undefined) return;
+
+  void refreshBadge().catch((cause: unknown) => {
+    console.error(`[${PROTOCOL}] could not refresh the badge:`, cause);
+  });
+});
 
 /**
  * Generates the EIP-6963 identity once, and only once.

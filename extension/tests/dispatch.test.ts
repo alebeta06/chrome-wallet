@@ -16,6 +16,7 @@ import type {
   ConnectRequestInput,
   SignatureRequestInput,
 } from "@/lib/approvals";
+import type { FeeEstimate, SendInput, TransactionSender } from "@/lib/signer";
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
@@ -215,10 +216,10 @@ describe("the trust boundary", () => {
 
   /**
    * 🇪🇸 NOTA: este test usaba `eth_accounts`, que en la Fase 3 ya está
-   * implementado, y en la Fase 5 le pasó lo mismo a `eth_requestAccounts`. Se
-   * mueve a `eth_sendTransaction` —que llega en la Fase 6— porque lo que
-   * comprueba no es el método concreto: es que la puerta y la implementación son
-   * dos cosas distintas. Un método público sin implementar tiene que dar 4200
+   * implementado; en la Fase 5, a `eth_requestAccounts`; en la Fase 6, a
+   * `eth_sendTransaction`. Ahora vive en `eth_signTypedData_v4`, que llega en la
+   * Fase 7. Lo que comprueba no es el método concreto: es que la puerta y la
+   * implementación son dos cosas distintas. Un método público sin implementar tiene que dar 4200
    * (pasó el control de emisor y cayó por el `default`), no 4100. Si algún día
    * diera 4100, sería que la frontera está rechazando métodos públicos y ninguna
    * dApp podría hablar con la wallet.
@@ -230,7 +231,7 @@ describe("the trust boundary", () => {
     const { dispatch } = setup();
 
     expectError(
-      await dispatch(request("eth_sendTransaction"), pageSender(), RUNTIME_ID),
+      await dispatch(request("eth_signTypedData_v4"), pageSender(), RUNTIME_ID),
       ErrorCode.UNSUPPORTED_METHOD,
     );
   });
@@ -1141,7 +1142,7 @@ describe("the activity log", () => {
   it("records the call and then the error when a call fails", async () => {
     const { area, dispatch } = setup(LOADED_WALLET);
 
-    await dispatch(request("eth_sendTransaction"), pageSender(), RUNTIME_ID);
+    await dispatch(request("eth_signTypedData_v4"), pageSender(), RUNTIME_ID);
 
     const entries = logsIn(area);
     expect(entries.map((entry) => entry.level)).toEqual(["call", "error"]);
@@ -1711,5 +1712,315 @@ describe("WalletSnapshot.activeSite", () => {
 
     expect(snapshot.activeSite).toBeNull();
     expect(snapshot.accounts).toHaveLength(2);
+  });
+});
+
+// ============================================================================
+// Phase 6 — eth_sendTransaction
+// ============================================================================
+
+const TX_HASH = "0xabc123" as const;
+
+/** A transaction sender whose behaviour the test decides. */
+function fakeSender(options: { fail?: SerializedProviderError; estimate?: FeeEstimate | null } = {}) {
+  const sent: SendInput[] = [];
+  const estimated: unknown[] = [];
+
+  const sender: TransactionSender = {
+    send: async (input) => {
+      sent.push(input);
+      if (options.fail !== undefined) throw new ProviderError(options.fail);
+      return TX_HASH;
+    },
+    estimate: async (input) => {
+      estimated.push(input);
+      return options.estimate === undefined
+        ? { maxFeePerGas: "0x77359400", maxPriorityFeePerGas: "0x3b9aca00", gas: "0x5208" }
+        : options.estimate;
+    },
+  };
+
+  return { sender, sent, estimated };
+}
+
+const SEND_PARAMS = [{ to: ANVIL_SECOND, value: "0xde0b6b3a7640000" }];
+
+/** localhost connected to account 0 (ANVIL_FIRST). */
+const CONNECTED = {
+  ...LOADED_WALLET,
+  "cc:connectedSites": { [LOCAL]: connected(LOCAL, 0) },
+};
+
+describe("eth_sendTransaction", () => {
+  it("signs and returns the hash after approval", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender, sent } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const hash = expectResult<string>(
+      await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID),
+    );
+
+    expect(hash).toBe(TX_HASH);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].accountIndex).toBe(0);
+    expect(sent[0].transaction.to).toBe(ANVIL_SECOND);
+    expect(sent[0].phrase).toBe(ANVIL_PHRASE);
+  });
+
+  /**
+   * 🇪🇸 NOTA: la ventana tiene que enseñar el `from` AUTORIZADO, nunca el que la
+   * página dijo. Por eso lo que se guarda en la solicitud pendiente es la
+   * transacción ya parseada y no los params crudos de la dApp.
+   */
+  it("hands the approval window the parsed transaction, not the dApp's params", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    // The dApp sent no `from` at all, and a lowercased `to`.
+    await dispatch(
+      request("eth_sendTransaction", [{ to: ANVIL_SECOND.toLowerCase() }]),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expect(signed).toHaveLength(1);
+    expect(signed[0].method).toBe("eth_sendTransaction");
+
+    const shown = signed[0].params[0] as Record<string, unknown>;
+    // Resolved from the permission, not from the page.
+    expect(shown.from).toBe(ANVIL_FIRST);
+    // And the defaults are filled in, so the window has nothing to guess.
+    expect(shown.value).toBe("0x0");
+    expect(shown.data).toBe("0x");
+  });
+
+  it("puts the estimate into what gets signed, so the window shows the real numbers", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, sent } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID);
+
+    const shown = signed[0].params[0] as Record<string, unknown>;
+    expect(shown.from).toBe(ANVIL_FIRST);
+    expect(shown.gas).toBe("0x5208");
+    expect(shown.maxFeePerGas).toBe("0x77359400");
+    // And exactly that is what was signed.
+    expect(sent[0].transaction.gas).toBe("0x5208");
+  });
+
+  it("still asks for approval when the estimate fails", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, sent } = fakeSender({ estimate: null });
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const hash = expectResult<string>(
+      await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID),
+    );
+
+    expect(hash).toBe(TX_HASH);
+    expect(signed).toHaveLength(1);
+    expect((signed[0].params[0] as Record<string, unknown>).gas).toBeUndefined();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("passes the active chain to the approval window", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(
+      { ...CONNECTED, "cc:chainId": SEPOLIA_CHAIN_ID },
+      undefined,
+      undefined,
+      { approvals, sender },
+    );
+
+    await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID);
+
+    expect(signed[0].chainId).toBe(SEPOLIA_CHAIN_ID);
+  });
+});
+
+describe("eth_sendTransaction refusals that never reach the user", () => {
+  /**
+   * 🇪🇸 NOTA: todo lo que la wallet ya sabe que va a rechazar se rechaza SIN
+   * abrir ventana. Una ventana de firma que aparece para algo condenado enseña a
+   * la gente a cerrar ventanas sin leerlas — y esa costumbre es exactamente lo
+   * que hace que el phishing funcione.
+   */
+  it("answers 4100 to an origin that never connected, without opening a window", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, sent } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(VERCEL), RUNTIME_ID),
+      ErrorCode.UNAUTHORIZED,
+    );
+
+    expect(signed).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE from CHECK, END TO END
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: el sitio está conectado a la cuenta 0 y pide firmar desde la 1. Si
+   * esto abriera ventana, la ventana enseñaría la cuenta 1 y el usuario la
+   * aprobaría porque la ventana lo dice. El permiso era para UNA cuenta.
+   */
+  it("answers 4100 to a from that is not this origin's account", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, sent } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(
+        request("eth_sendTransaction", [{ from: ANVIL_SECOND, to: ANVIL_FIRST }]),
+        pageSender(LOCAL),
+        RUNTIME_ID,
+      ),
+      ErrorCode.UNAUTHORIZED,
+    );
+
+    expect(signed).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it.each([
+    ["no params", [] as unknown[]],
+    ["a missing to", [{ value: "0x1" }]],
+    ["a malformed to", [{ to: "0xnope" }]],
+    ["a non-hex value", [{ to: ANVIL_SECOND, value: "1000" }]],
+    ["an unknown field", [{ to: ANVIL_SECOND, accessList: [] }]],
+    ["odd-length data", [{ to: ANVIL_SECOND, data: "0xabc" }]],
+  ])("answers -32602 to %s, without opening a window", async (_label, params) => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, sent } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_sendTransaction", params), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+
+    expect(signed).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("answers 4902 when the active chain is not in the catalogue", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup({ ...CONNECTED, "cc:chainId": "0xdead" }, undefined, undefined, {
+      approvals,
+      sender,
+    });
+
+    expectError(
+      await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.UNRECOGNIZED_CHAIN,
+    );
+    expect(signed).toEqual([]);
+  });
+});
+
+describe("eth_sendTransaction after the user has decided", () => {
+  it("answers 4001 when the user rejects, and signs nothing", async () => {
+    const { approvals } = fakeApprovals({
+      reject: { code: ErrorCode.USER_REJECTED, message: "User rejected the request." },
+    });
+    const { sender, sent } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.USER_REJECTED,
+    );
+
+    expect(sent).toEqual([]);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * A FAILED SEND IS DISTINGUISHABLE FROM A REJECTION
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: el usuario aprobó y el envío falló. Si llegara como 4001, la dApp
+   * enseñaría "cancelaste" a alguien que no canceló — le culpa de algo que no
+   * hizo y esconde la causa real.
+   */
+  it("keeps a post-approval failure out of the 4001 bucket", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender({
+      fail: { code: ErrorCode.INTERNAL, message: "Not enough ETH in this account." },
+    });
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const response = await dispatch(
+      request("eth_sendTransaction", SEND_PARAMS),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expectError(response, ErrorCode.INTERNAL);
+    if (response.ok) throw new Error("expected a failure");
+    expect(response.error.code).not.toBe(ErrorCode.USER_REJECTED);
+    expect(response.error.message).toContain("Not enough ETH");
+  });
+
+  it("surfaces an unreachable node as 4901", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender({
+      fail: { code: ErrorCode.CHAIN_DISCONNECTED, message: "Cannot reach the RPC endpoint." },
+    });
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.CHAIN_DISCONNECTED,
+    );
+  });
+});
+
+describe("the signing params never reach the log", () => {
+  /**
+   * ------------------------------------------------------------------------
+   * THE RULE FROM PHASE 3, NOW THAT THE METHOD ACTUALLY EXISTS
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: `redactParams` se escribió en la Fase 3 con un test, cuando
+   * `eth_sendTransaction` todavía respondía 4200. Ése era el motivo de
+   * escribirlo entonces: que cuando el método existiera de verdad, la regla ya
+   * estuviera puesta y nadie tuviera que acordarse de ella mientras escribía el
+   * código de firmar. Esto lo comprueba con el método implementado.
+   */
+  it("logs the call but redacts what was being signed", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { area, dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(
+      request("eth_sendTransaction", [{ to: ANVIL_SECOND, value: "0xdeadbeef" }]),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    const entries = logsIn(area);
+    expect(entries[0].label).toBe("eth_sendTransaction");
+    expect(entries[0].detail).toBe("[redacted]");
+    expect(JSON.stringify(entries)).not.toContain("0xdeadbeef");
+    expect(JSON.stringify(entries)).not.toContain(ANVIL_SECOND);
+  });
+
+  it("never writes the mnemonic, even on a failed send", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender({
+      fail: { code: ErrorCode.INTERNAL, message: "boom" },
+    });
+    const { area, dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID);
+
+    expect(JSON.stringify(logsIn(area))).not.toContain("junk");
   });
 });
