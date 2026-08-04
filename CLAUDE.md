@@ -84,6 +84,53 @@ IIFE lo inlinearía por separado y tendrías dos instancias.
 - Solicitudes pendientes: persistir en `chrome.storage.local`, nunca solo en
   un `Map` en memoria (el service worker se duerme a los ~30 s).
 
+## Escrituras en storage: el read-modify-write (aprendido en la Fase 6)
+
+`chrome.storage.local` **no tiene transacciones**, y `chrome.runtime.onMessage`
+**despacha concurrente**. Cualquier clave que guarde un `Record` entero —
+`cc:pendingRequests`, `cc:connectedSites`, `cc:logs` — se actualiza leyendo,
+modificando y escribiendo, y eso es una carrera:
+
+```
+petición A: lee {}          petición B: lee {}
+petición A: escribe {a}     petición B: escribe {b}   ← se come la A
+```
+
+**El síntoma no es un error.** No hay excepción, ni log, ni nada en consola. Lo
+que pasa es que una solicitud desaparece de storage **con su ventana de
+aprobación abierta delante del usuario**: la ventana dice "esta solicitud ya no
+está esperando" y la dApp se queda hasta el timeout completo.
+
+Regla: toda escritura sobre una de esas claves va por una **cadena serializada**
+en el closure del módulo que la posee (ver `serialize()` en `approvals.ts`). Y la
+comprobación previa —buscar un duplicado, mirar si existe— tiene que ir **dentro
+del mismo turno**: separada de la escritura, dos peticiones simultáneas pasan
+ambas el check.
+
+Que la cadena no sobreviva al reinicio del worker es correcto: si el worker
+murió, no hay escrituras en vuelo contra las que serializar.
+
+### La lección del `flush()`
+
+El test de deduplicación de la Fase 5 pasaba, y la carrera estaba ahí desde
+entonces. Pasaba por esto:
+
+```ts
+const first = coordinator.requestConnect(CONNECT);
+await flush();                                   // ← el culpable
+const second = coordinator.requestConnect(CONNECT);
+```
+
+Ese `await` intermedio **serializaba artificialmente** dos llamadas que en el
+navegador salen en paralelo. El test comprobaba un escenario que no ocurre.
+
+> **Un test que necesita un `await` intermedio para pasar probablemente no está
+> probando el caso real.** Antes de meter uno, pregúntate si el navegador lo
+> pone: si la respuesta es no, quítalo y mira si el test sigue verde.
+
+Los tests concurrentes de verdad lanzan las llamadas **sin `await` entre ellas** y
+esperan al final (`await Promise.all([...])`).
+
 ## Git
 
 - Conventional Commits en inglés, atómicos por unidad lógica

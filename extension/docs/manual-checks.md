@@ -653,3 +653,206 @@ chrome.runtime.sendMessage('<TU_ID>', {
 No debe conectar nada. El background solo acepta decisiones de sus **propias**
 páginas; si no, cualquier web se saltaría la ventana entera — que es justo el
 permiso que esta fase existe para pedir.
+
+---
+
+# Fase 6 — Firma de transacciones
+
+Requiere `pnpm build` + recargar (↻), Anvil, y la dApp. Empieza con la wallet
+importada y `localhost:3000` **conectado a la cuenta 0**.
+
+## 35. Enviar 1 ETH
+
+En la dApp, sección 4: destino `0x7099…79C8`, cantidad `1`, **Send transaction**.
+
+Se abre `notification.html`. Comprueba, en este orden:
+
+1. **El origen arriba y en grande**, igual que en `connect.html`.
+2. `From` es la cuenta 0 — la que autorizaste, no otra.
+3. `Amount` dice **`1.0000 ETH`**, no `0xde0b6b3a7640000`. Una cantidad en hex
+   no es algo que nadie pueda juzgar antes de aprobar.
+4. `Gas` y `Max total` con números reales.
+5. **No** aparece el aviso rojo de contrato: es una transferencia simple.
+
+Aprueba. La dApp muestra el hash. Abre el popup: la cuenta 0 ha bajado ~1 ETH y
+la 1 ha subido 1.
+
+## 36. El recibo dice `type: 2` (spec 17)
+
+En la consola del service worker, con el hash de la comprobación anterior:
+
+```js
+const rpc = (method, params) => fetch('http://localhost:8545', {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+}).then((r) => r.json())
+
+;(await rpc('eth_getTransactionByHash', ['<EL_HASH>'])).result.type
+```
+
+Esperado: **`"0x2"`**. Y en el mismo objeto, `maxFeePerGas` y
+`maxPriorityFeePerGas` presentes, `gasPrice` no relevante.
+
+> 🇪🇸 NOTA: se comprueba en vez de darlo por hecho. Ethers suele inferir el tipo
+> bien, pero "suele" no es una garantía: una transacción legacy en una red
+> EIP-1559 paga de más y puede quedarse atascada. El firmante pone `type: 2`
+> explícito y hay un test que mira el prefijo `0x02` del sobre RLP — esto
+> confirma que el nodo lo ve igual.
+
+## 37. El `from` de otra cuenta se rechaza SIN abrir ventana
+
+En la consola de la dApp:
+
+```js
+const detail = await new Promise((resolve) => {
+  window.addEventListener('eip6963:announceProvider', (e) => {
+    if (e.detail.info.rdns === 'academy.codecrypto.wallet') resolve(e.detail)
+  })
+  window.dispatchEvent(new Event('eip6963:requestProvider'))
+})
+
+// La cuenta 1, que NO es la autorizada para este origen.
+await detail.provider.request({
+  method: 'eth_sendTransaction',
+  params: [{
+    from: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+    to:   '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+    value: '0xde0b6b3a7640000',
+  }],
+})
+```
+
+Esperado: error **4100**, y **ninguna ventana se abre**.
+
+> 🇪🇸 NOTA: que no se abra ventana es la mitad de la comprobación. Si se abriera,
+> enseñaría la cuenta 1 y el usuario la aprobaría porque la ventana lo dice — el
+> permiso que dio era para UNA cuenta. Y una ventana que aparece para algo
+> condenado enseña a cerrar ventanas sin leerlas, que es la costumbre que hace
+> funcionar el phishing.
+
+## 38. Una llamada a contrato se ve distinta
+
+Mismo snippet, pero con `data` y `value: 0`:
+
+```js
+await detail.provider.request({
+  method: 'eth_sendTransaction',
+  params: [{
+    to: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+    value: '0x0',
+    data: '0xa9059cbb000000000000000000000000000000000000000000000000000000000000dead',
+  }],
+})
+```
+
+En la ventana:
+
+- Banda **roja** arriba: "This is a contract call, not a plain transfer."
+- El selector `0xa9059cbb` visible, y **show all** despliega el `data` completo.
+- `Amount` dice `0.0000 ETH`.
+
+Ese último punto es el que importa: **el `0.0000` tranquiliza y es justo lo
+peligroso.** Sin el aviso, una `approve()` infinita se ve igual que no mandar
+nada. Rechaza.
+
+## 39. Cerrar con la X y rechazar
+
+- **X** en `notification.html` → la dApp recibe **4001** y vuelve al formulario,
+  sin banner rojo.
+- **Reject** → mismo 4001.
+
+## 40. El worker no se duerme con la ventana abierta
+
+1. **Send transaction**.
+2. Con la ventana abierta, espera **45-60 s** mirando `chrome://extensions`. El
+   service worker **no** debe pasar a inactivo.
+3. Aprueba.
+
+La transacción se envía. El timeout de firma es de 120 s, más que el de conexión.
+
+## 41. Badge y notificación (specs 32, 33)
+
+Al abrirse la ventana de firma:
+
+- El icono de la extensión muestra **`1`** en violeta.
+- Aparece una **notificación de escritorio** con el icono de la wallet y
+  "Signature request".
+
+Al aprobar o rechazar, el badge **desaparece**.
+
+**El caso que importa del badge** — que sobreviva al sueño del worker:
+
+1. Lanza una transacción y **no decides**.
+2. Cierra la ventana de aprobación con la X → llega el 4001.
+3. Lanza otra y deja la ventana abierta.
+4. En `chrome://extensions`, pulsa **Service worker** → **Stop**.
+5. El badge sigue diciendo `1`, y al despertar el worker lo recalcula solo.
+
+> 🇪🇸 NOTA: si el badge fuera un contador en memoria, ahí diría cero mientras el
+> usuario tiene una ventana abierta esperándole. Se deriva de
+> `cc:pendingRequests` justo para que ese caso no exista.
+
+Si la notificación **no** aparece: comprueba que el icono es un PNG.
+`chrome.notifications` falla en silencio con un SVG — sin excepción, sin
+notificación y sin nada en consola.
+
+## 42. Dos transacciones seguidas, sin error de nonce
+
+Manda una de `0.1`, apruébala, y **sin esperar al recibo** manda otra de `0.2` y
+apruébala también.
+
+Las dos tienen que confirmarse. Si vieras
+`replacement transaction underpriced`, es que la cola del firmante no está
+serializando.
+
+Para forzar el solapamiento de verdad, desde la consola de la dApp:
+
+```js
+const send = (eth) => detail.provider.request({
+  method: 'eth_sendTransaction',
+  params: [{ to: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC', value: eth }],
+})
+
+// Dos a la vez. Se abren DOS ventanas: cada transacción se aprueba por separado.
+Promise.all([send('0x2386f26fc10000'), send('0x2386f26fc10000')]).then(console.log)
+```
+
+Esperado: **dos ventanas**, no una. Aprueba las dos → dos hashes distintos.
+
+> 🇪🇸 NOTA: que se abran dos es lo correcto y es una diferencia deliberada con
+> las conexiones, que sí se agrupan. Dos `eth_sendTransaction` del mismo origen
+> son dos transacciones DISTINTAS: compartir una aprobación enviaría la segunda
+> sin que el usuario la haya visto nunca.
+
+## 43. Sin fondos, y que no se confunda con un rechazo
+
+Envía una cantidad mayor que el saldo, por ejemplo `99999`, y **apruébala**.
+
+La dApp debe decir algo como "Not enough ETH in this account to cover the value
+plus gas", con código **-32603** — **nunca 4001**.
+
+> 🇪🇸 NOTA: es la diferencia que hace que el mensaje sea honesto. Un 4001 aquí le
+> diría "cancelaste la transacción" a alguien que la aprobó y se quedó sin
+> fondos: le culpa de algo que no hizo y esconde la causa real.
+
+## 44. Anvil apagado
+
+Para Anvil e intenta enviar. Dos cosas:
+
+- La ventana de firma **se abre igual**, diciendo que no pudo estimar la comisión
+  — sin inventarse un número — y el botón de aprobar **sigue activo**.
+- Al aprobar, la dApp recibe **4901** ("cannot reach the RPC endpoint"), no un
+  -32603 genérico.
+
+Bloquear la aprobación habría convertido un parpadeo del nodo en "la wallet no
+deja operar".
+
+## 45. Los params de firma no llegan al registro
+
+```js
+(await chrome.storage.local.get('cc:logs'))['cc:logs']
+  .filter((e) => e.label === 'eth_sendTransaction')
+```
+
+Cada entrada tiene `detail: "[redacted]"`. **En ninguna aparecen el destino, la
+cantidad ni el `data`.** Y en todo `cc:logs`, jamás el mnemonic.
