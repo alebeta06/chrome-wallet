@@ -856,3 +856,160 @@ deja operar".
 
 Cada entrada tiene `detail: "[redacted]"`. **En ninguna aparecen el destino, la
 cantidad ni el `data`.** Y en todo `cc:logs`, jamás el mnemonic.
+
+---
+
+# Fase 7 — EIP-712
+
+Requiere `pnpm build` + recargar (↻) y la dApp. **Anvil no hace falta para
+firmar** — ver la comprobación 50.
+
+Empieza con `localhost:3000` conectado a la cuenta 0.
+
+## 46. Firmar y verificar (el punto 4 de la prueba de aceptación)
+
+Sección 5 de la dApp, ejemplo **Ether Mail** (el que viene por defecto) →
+**Sign typed data**.
+
+Se abre `notification.html`. Comprueba:
+
+1. El origen arriba y en grande.
+2. **Domain** antes que el mensaje: `name`, `version`, `chainId`,
+   `verifyingContract`.
+3. **`Mail · primaryType`** como título del bloque del mensaje.
+4. El mensaje campo a campo, con `from` y `to` **indentados** bajo su nombre —
+   no un JSON en bruto.
+
+Firma. En la dApp:
+
+```
+✓ verified
+recovered 0xf39F…2266, expected 0xf39F…2266
+```
+
+> 🇪🇸 NOTA: ese `✓` es la comprobación de verdad de la fase. `verifyTypedData`
+> recalcula el hash EIP-712 desde cero y recupera quién firmó usando **solo la
+> firma**. Si el separador de dominio o el encoding de los tipos no fueran los
+> del estándar, la dirección recuperada sería otra — y una firma mal construida
+> verifica perfectamente contra su propio código equivocado.
+
+## 47. `EIP712Domain` en `types` no rompe nada
+
+Botón **With EIP712Domain** → **Sign typed data**.
+
+- La ventana **sí** muestra el `EIP712Domain` en el payload que llegó.
+- La firma funciona y verifica igual.
+
+> 🇪🇸 NOTA: la mayoría de las dApps lo incluyen, porque el estándar lo define.
+> Ethers v6 lo construye solo desde el `domain` y lanza
+> `ambiguous primary types or unused types` si además se lo pasas en `types`. Se
+> borra sobre una **copia**, para que la ventana pueda enseñar lo que la dApp
+> mandó de verdad.
+
+## 48. Tipos anidados y arrays
+
+Botón **Nested arrays** → **Sign typed data**.
+
+En la ventana, `items` debe desplegarse como `items[0]` y `items[1]`, cada uno
+con su `sku` y su `amount` indentados. Firma y verifica.
+
+## 49. Un chainId de otra cadena se RECHAZA
+
+Botón **Wrong chainId** → **Sign typed data**.
+
+Esperado: error **-32602** con un mensaje del estilo
+"This message is for chain 1, but the wallet is on 31337 (Anvil Local)", y
+**ninguna ventana se abre**.
+
+> 🇪🇸 NOTA: éste es el caso que de verdad importa de EIP-712. Estás en Anvil,
+> jugando con dinero de mentira, y la dApp te pide firmar algo cuyo dominio dice
+> `chainId: 1`. Esa firma es criptográficamente válida **en mainnet**: si era un
+> `Permit`, alguien acaba de recibir permiso para mover tus tokens de verdad —
+> sin transacción, sin gas y sin nada en el explorador.
+>
+> La sensación de "estoy en una testnet, no puede pasar nada" es justo lo que
+> hace que se firme sin mirar. Por eso se rechaza en vez de avisar, que es
+> además lo que hace MetaMask.
+
+## 50. Firmar funciona con Anvil apagado
+
+Para Anvil (`Ctrl-C`) y repite la comprobación 46.
+
+**La firma funciona igual.** Y en la misma dApp, **Send transaction** falla con
+4901.
+
+> 🇪🇸 NOTA: no es casualidad y merece verse una vez. Firmar es criptografía
+> local — no hay nonce que pedir, no hay comisión que estimar y no hay nada que
+> difundir. Lo único que se consulta de la red es su chainId, y sale de storage.
+> Por eso el firmante de mensajes no pasa por la cola del nonce: no hay nonce.
+
+Vuelve a arrancar Anvil.
+
+## 51. Firmar como otra cuenta se rechaza sin ventana
+
+En la consola de la dApp:
+
+```js
+const detail = await new Promise((resolve) => {
+  window.addEventListener('eip6963:announceProvider', (e) => {
+    if (e.detail.info.rdns === 'academy.codecrypto.wallet') resolve(e.detail)
+  })
+  window.dispatchEvent(new Event('eip6963:requestProvider'))
+})
+
+const payload = document.querySelector('[data-testid="input-typed-data"]').value
+
+// La cuenta 1, que NO es la autorizada para este origen.
+await detail.provider.request({
+  method: 'eth_signTypedData_v4',
+  params: ['0x70997970C51812dc3A010C7d01b50e0d17dc79C8', payload],
+})
+```
+
+Esperado: **4100**, y ninguna ventana. Mismo control que el `from` de la Fase 6
+y por el mismo motivo: el permiso que diste era para UNA cuenta.
+
+## 52. Payload roto
+
+Borra una llave del JSON en el textarea y pulsa firmar. La dApp dice que el JSON
+no parsea, **sin llegar a llamar a la wallet**.
+
+Ahora prueba desde consola con JSON válido pero payload roto:
+
+```js
+await detail.provider.request({
+  method: 'eth_signTypedData_v4',
+  params: [
+    '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+    JSON.stringify({ domain: {}, types: { Mail: [] }, primaryType: 'Invoice', message: {} }),
+  ],
+})
+```
+
+Esperado: **-32602** mencionando `Invoice` — no un -32603 genérico. El
+`primaryType` no está declarado en `types`, y se corta antes de abrir ventana.
+
+## 53. Cerrar con la X
+
+Firma, y cierra `notification.html` con la X sin decidir. La dApp recibe
+**4001** y vuelve al formulario, sin banner rojo.
+
+## 54. Los params no llegan al registro
+
+```js
+(await chrome.storage.local.get('cc:logs'))['cc:logs']
+  .filter((e) => e.label === 'eth_signTypedData_v4')
+```
+
+`detail: "[redacted]"` en todas. **Ni el mensaje, ni el dominio, ni el
+`verifyingContract`.**
+
+## 55. La tarjeta de la extensión, sin avisos
+
+En `chrome://extensions`, la tarjeta de CodeCrypto Wallet: **cero errores**.
+
+Antes de esta fase aparecían avisos de *"cross-world extension resource
+mismatch"* por los `<link rel="modulepreload">` que Vite generaba. Bajo
+`chrome-extension://` no adelantaban nada —los archivos son locales— y llenaban
+el panel de ruido. Un panel de errores con ruido permanente es un panel que se
+deja de mirar.
