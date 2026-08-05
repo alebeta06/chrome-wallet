@@ -51,6 +51,18 @@ export default defineConfig({
     emptyOutDir: true,
     target: "chrome120",
     sourcemap: true,
+    /**
+     * 🇪🇸 NOTA: Vite añade `<link rel="modulepreload">` a los HTML para adelantar
+     * la descarga de los chunks. Bajo `chrome-extension://` eso no adelanta nada
+     * —los archivos son locales— y en cambio llena la tarjeta de la extensión de
+     * avisos de "cross-world extension resource mismatch". Son inocuos, pero un
+     * panel de errores con ruido permanente es un panel que se deja de mirar, y
+     * entonces el aviso que sí importa pasa desapercibido.
+     *
+     * La config de scripts clásicos ya lo tenía desactivado por otro motivo (el
+     * bundle IIFE no tiene chunks que precargar).
+     */
+    modulePreload: false,
     rollupOptions: {
       input: {
         index: resolve(root, "index.html"),
