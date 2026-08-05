@@ -11,6 +11,7 @@ import { defaultNetworks } from "@/lib/networks";
 import { functionSelector, isContractCall, type ParsedTransaction } from "@/lib/tx";
 import { callBackground, toRpcError } from "@/ui/rpc";
 import { useApprovalPort } from "@/ui/connect/useApprovalPort";
+import { TypedDataPrompt } from "./TypedDataPrompt";
 
 function readRequestId(): RequestId | null {
   const value = new URLSearchParams(window.location.search).get("requestId");
@@ -110,6 +111,37 @@ export function Notification() {
           Sending…
         </p>
       </main>
+    );
+  }
+
+  /**
+   * 🇪🇸 NOTA: dos formas de solicitud bajo el mismo `kind: "signature"`, y se
+   * ramifica por `method`. Comparten todo lo que costó acertar —el puerto
+   * keep-alive, quién cierra la ventana, el timeout de 120 s— y difieren solo en
+   * qué hay que enseñar antes de aprobar.
+   */
+  if (phase.request.method === "eth_signTypedData_v4") {
+    return (
+      <TypedDataPrompt
+        request={phase.request}
+        onApprove={() =>
+          decide({
+            type: "CODECRYPTO_DECISION",
+            requestId: phase.request.id,
+            kind: "signature",
+            approved: true,
+          })
+        }
+        onReject={() =>
+          decide({
+            type: "CODECRYPTO_DECISION",
+            requestId: phase.request.id,
+            kind: "signature",
+            approved: false,
+            error: ProviderErrors.userRejected(),
+          })
+        }
+      />
     );
   }
 

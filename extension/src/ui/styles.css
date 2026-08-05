@@ -580,3 +580,86 @@ input[type="checkbox"] {
   word-break: break-all;
   color: var(--text-muted);
 }
+
+/* --------------------------------------------------------------------------
+   Typed data (EIP-712) approval
+
+   🇪🇸 NOTA: el bloque del payload scrollea y la barra de acciones NO. Un
+   `message` muy anidado empujaría los botones fuera de la ventana, y una
+   pantalla de firma en la que no se ve el botón de rechazar es una pantalla que
+   solo deja aprobar.
+   -------------------------------------------------------------------------- */
+
+.approval--scroll {
+  height: 100vh;
+  min-height: 0;
+}
+
+.approval__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.typed-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  background: var(--surface);
+}
+
+.typed-block__title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin: 0 0 var(--space-2);
+}
+
+.typed-block__type {
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.7;
+  font-weight: 400;
+}
+
+.typed-fields {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.typed-field {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.typed-field__label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.typed-field__type {
+  opacity: 0.6;
+  font-size: 10px;
+}
+
+.typed-field__value {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* Nested structs indent, so what belongs to what stays visible. */
+.typed-field--group > .typed-fields {
+  margin-left: var(--space-3);
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--border);
+  margin-top: var(--space-1);
+}
