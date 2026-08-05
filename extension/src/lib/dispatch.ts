@@ -57,6 +57,7 @@ import {
 } from "./sites";
 import type { WalletStorage } from "./storage";
 import { parseTransactionRequest } from "./tx";
+import { domainChainId, parseTypedDataParams } from "./typed-data";
 
 export interface DispatcherDeps {
   storage: WalletStorage;
@@ -121,6 +122,10 @@ const NO_SENDER: TransactionSender = {
     ),
   // Null is the "could not estimate" answer the approval window already handles.
   estimate: () => Promise.resolve(null),
+  signTypedData: () =>
+    Promise.reject(
+      new ProviderError(ProviderErrors.internal("This wallet build cannot sign messages.")),
+    ),
 };
 
 export type Dispatcher = (
@@ -262,6 +267,8 @@ async function handle(
       return handleDisconnect(deps, context.origin);
     case "eth_sendTransaction":
       return handleSendTransaction(deps, context, params);
+    case "eth_signTypedData_v4":
+      return handleSignTypedData(deps, context, params);
 
     // ---- Internal surface: extension UI only ----
     case "wallet_createMnemonic":
@@ -484,6 +491,85 @@ async function handleSendTransaction(
   }
 
   return sender.send({ network, phrase, accountIndex, transaction: prepared });
+}
+
+/**
+ * Signs an EIP-712 payload, after the user says so.
+ *
+ * 🇪🇸 NOTA: mismo orden que `eth_sendTransaction` — todo lo que se puede
+ * rechazar sin molestar al usuario se rechaza antes de abrir nada. Y una
+ * diferencia que no se ve: firmar NO necesita red, así que esto funciona con el
+ * nodo apagado. Lo único que se consulta de la red es su chainId, y sale de
+ * storage.
+ */
+async function handleSignTypedData(
+  deps: HandlerContext,
+  context: SenderContext,
+  params: unknown[],
+): Promise<Hex> {
+  const { storage, approvals, sender } = deps;
+  const origin = context.origin;
+
+  const [sites, accounts] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:accounts"),
+  ]);
+
+  const list = accounts ?? [];
+  const accountIndex = resolveSiteAccount(sites, origin, list.length);
+
+  if (accountIndex === null) {
+    throw new ProviderError(
+      ProviderErrors.unauthorized("Connect to this wallet before signing a message."),
+    );
+  }
+
+  // Throws -32602 for a malformed payload, or 4100 for someone else's account.
+  const { address, payload } = parseTypedDataParams(params, list[accountIndex]);
+  const network = await resolveActiveNetwork(storage);
+
+  /**
+   * ------------------------------------------------------------------------
+   * A SIGNATURE FOR ANOTHER CHAIN IS REFUSED, NOT WARNED ABOUT
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: éste es el caso que de verdad importa de EIP-712. Estás en Anvil,
+   * jugando con dinero de mentira, y la dApp te pide firmar algo cuyo dominio
+   * dice `chainId: 1`. La firma es criptográficamente válida en MAINNET: si era
+   * un `Permit`, alguien acaba de recibir permiso para mover tus tokens de
+   * verdad — sin transacción, sin gas y sin nada en el explorador.
+   *
+   * La sensación de "estoy en una testnet, no puede pasar nada" es justo lo que
+   * hace que se firme sin mirar. Por eso se rechaza en vez de avisar: un aviso
+   * en una ventana de firma —que no cuesta gas y se percibe inofensiva— se lee
+   * todavía menos que un aviso normal. Es además lo que hace MetaMask.
+   *
+   * Un dominio SIN chainId es legal (un login que vale en cualquier red) y no
+   * hay nada que comparar.
+   */
+  const target = domainChainId(payload);
+  if (target !== null && BigInt(target) !== BigInt(network.chainId)) {
+    throw invalidParams(
+      `This message is for chain ${BigInt(target)}, but the wallet is on ${BigInt(network.chainId)} (${network.name}).`,
+    );
+  }
+
+  await approvals.requestSignature({
+    origin,
+    method: "eth_signTypedData_v4",
+    // The parsed payload, so the window renders exactly what will be signed —
+    // EIP712Domain included if the dApp sent it.
+    params: [address, payload],
+    chainId: network.chainId,
+    accountIndex,
+    ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
+  });
+
+  const phrase = await storage.get("cc:mnemonic");
+  if (phrase === undefined || phrase.length === 0) {
+    throw new ProviderError(ProviderErrors.internal("The wallet has no key to sign with."));
+  }
+
+  return sender.signTypedData({ phrase, accountIndex, address, payload });
 }
 
 /**

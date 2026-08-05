@@ -16,7 +16,12 @@ import type {
   ConnectRequestInput,
   SignatureRequestInput,
 } from "@/lib/approvals";
-import type { FeeEstimate, SendInput, TransactionSender } from "@/lib/signer";
+import type {
+  FeeEstimate,
+  SendInput,
+  SignTypedDataInput,
+  TransactionSender,
+} from "@/lib/signer";
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
@@ -216,10 +221,11 @@ describe("the trust boundary", () => {
 
   /**
    * 🇪🇸 NOTA: este test usaba `eth_accounts`, que en la Fase 3 ya está
-   * implementado; en la Fase 5, a `eth_requestAccounts`; en la Fase 6, a
-   * `eth_sendTransaction`. Ahora vive en `eth_signTypedData_v4`, que llega en la
-   * Fase 7. Lo que comprueba no es el método concreto: es que la puerta y la
-   * implementación son dos cosas distintas. Un método público sin implementar tiene que dar 4200
+   * implementado; luego a `eth_requestAccounts` (Fase 5), `eth_sendTransaction`
+   * (Fase 6) y `eth_signTypedData_v4` (Fase 7). Ahora vive en
+   * `wallet_switchEthereumChain`, que llega en la Fase 8 y es de los últimos
+   * sitios donde puede vivir. Lo que comprueba no es el método concreto: es que
+   * la puerta y la implementación son dos cosas distintas. Un método público sin implementar tiene que dar 4200
    * (pasó el control de emisor y cayó por el `default`), no 4100. Si algún día
    * diera 4100, sería que la frontera está rechazando métodos públicos y ninguna
    * dApp podría hablar con la wallet.
@@ -231,7 +237,7 @@ describe("the trust boundary", () => {
     const { dispatch } = setup();
 
     expectError(
-      await dispatch(request("eth_signTypedData_v4"), pageSender(), RUNTIME_ID),
+      await dispatch(request("wallet_switchEthereumChain"), pageSender(), RUNTIME_ID),
       ErrorCode.UNSUPPORTED_METHOD,
     );
   });
@@ -1142,7 +1148,7 @@ describe("the activity log", () => {
   it("records the call and then the error when a call fails", async () => {
     const { area, dispatch } = setup(LOADED_WALLET);
 
-    await dispatch(request("eth_signTypedData_v4"), pageSender(), RUNTIME_ID);
+    await dispatch(request("wallet_switchEthereumChain"), pageSender(), RUNTIME_ID);
 
     const entries = logsIn(area);
     expect(entries.map((entry) => entry.level)).toEqual(["call", "error"]);
@@ -1720,11 +1726,13 @@ describe("WalletSnapshot.activeSite", () => {
 // ============================================================================
 
 const TX_HASH = "0xabc123" as const;
+const SIGNATURE = "0xdeadbeef" as const;
 
 /** A transaction sender whose behaviour the test decides. */
 function fakeSender(options: { fail?: SerializedProviderError; estimate?: FeeEstimate | null } = {}) {
   const sent: SendInput[] = [];
   const estimated: unknown[] = [];
+  const typedData: SignTypedDataInput[] = [];
 
   const sender: TransactionSender = {
     send: async (input) => {
@@ -1738,9 +1746,14 @@ function fakeSender(options: { fail?: SerializedProviderError; estimate?: FeeEst
         ? { maxFeePerGas: "0x77359400", maxPriorityFeePerGas: "0x3b9aca00", gas: "0x5208" }
         : options.estimate;
     },
+    signTypedData: async (input) => {
+      typedData.push(input);
+      if (options.fail !== undefined) throw new ProviderError(options.fail);
+      return SIGNATURE;
+    },
   };
 
-  return { sender, sent, estimated };
+  return { sender, sent, estimated, typedData };
 }
 
 const SEND_PARAMS = [{ to: ANVIL_SECOND, value: "0xde0b6b3a7640000" }];
@@ -2022,5 +2035,247 @@ describe("the signing params never reach the log", () => {
     await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID);
 
     expect(JSON.stringify(logsIn(area))).not.toContain("junk");
+  });
+});
+
+// ============================================================================
+// Phase 7 — eth_signTypedData_v4
+// ============================================================================
+
+const TYPED_DATA = {
+  domain: {
+    name: "Ether Mail",
+    version: "1",
+    chainId: 31337,
+    verifyingContract: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC",
+  },
+  types: {
+    Person: [
+      { name: "name", type: "string" },
+      { name: "wallet", type: "address" },
+    ],
+    Mail: [
+      { name: "from", type: "Person" },
+      { name: "contents", type: "string" },
+    ],
+  },
+  primaryType: "Mail",
+  message: {
+    from: { name: "Cow", wallet: "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826" },
+    contents: "Hello, Bob!",
+  },
+};
+
+const signParams = (payload: unknown = TYPED_DATA, address = ANVIL_FIRST) => [
+  address,
+  JSON.stringify(payload),
+];
+
+describe("eth_signTypedData_v4", () => {
+  it("signs and returns the signature after approval", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender, typedData } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const signature = expectResult<string>(
+      await dispatch(request("eth_signTypedData_v4", signParams()), pageSender(LOCAL), RUNTIME_ID),
+    );
+
+    expect(signature).toBe(SIGNATURE);
+    expect(typedData).toHaveLength(1);
+    expect(typedData[0].address).toBe(ANVIL_FIRST);
+    expect(typedData[0].payload.primaryType).toBe("Mail");
+  });
+
+  /**
+   * 🇪🇸 NOTA: la ventana recibe el payload PARSEADO, con el `EIP712Domain` que la
+   * dApp mandó si lo mandó. Se enseña lo que llegó, no una versión recortada
+   * para ethers.
+   */
+  it("gives the window the payload as it arrived, EIP712Domain included", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const withDomainType = {
+      ...TYPED_DATA,
+      types: {
+        EIP712Domain: [{ name: "name", type: "string" }],
+        ...TYPED_DATA.types,
+      },
+    };
+
+    await dispatch(
+      request("eth_signTypedData_v4", signParams(withDomainType)),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expect(signed[0].method).toBe("eth_signTypedData_v4");
+    const payload = signed[0].params[1] as { types: Record<string, unknown> };
+    expect(payload.types.EIP712Domain).toBeDefined();
+  });
+
+  it("answers 4001 when the user rejects, and signs nothing", async () => {
+    const { approvals } = fakeApprovals({
+      reject: { code: ErrorCode.USER_REJECTED, message: "User rejected the request." },
+    });
+    const { sender, typedData } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_signTypedData_v4", signParams()), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.USER_REJECTED,
+    );
+
+    expect(typedData).toEqual([]);
+  });
+});
+
+describe("eth_signTypedData_v4 refusals that never reach the user", () => {
+  it("answers 4100 to an origin that never connected", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, typedData } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_signTypedData_v4", signParams()), pageSender(VERCEL), RUNTIME_ID),
+      ErrorCode.UNAUTHORIZED,
+    );
+
+    expect(signed).toEqual([]);
+    expect(typedData).toEqual([]);
+  });
+
+  /** Same control as the `from` of a transaction, and for the same reason. */
+  it("answers 4100 when asked to sign as another account", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(
+        request("eth_signTypedData_v4", signParams(TYPED_DATA, ANVIL_SECOND)),
+        pageSender(LOCAL),
+        RUNTIME_ID,
+      ),
+      ErrorCode.UNAUTHORIZED,
+    );
+
+    expect(signed).toEqual([]);
+  });
+
+  it.each([
+    ["no params", [] as unknown[]],
+    ["broken JSON", [ANVIL_FIRST, "{ not json"]],
+    ["no domain", [ANVIL_FIRST, JSON.stringify({ ...TYPED_DATA, domain: undefined })]],
+    ["no primaryType", [ANVIL_FIRST, JSON.stringify({ ...TYPED_DATA, primaryType: undefined })]],
+    [
+      "a primaryType not in types",
+      [ANVIL_FIRST, JSON.stringify({ ...TYPED_DATA, primaryType: "Invoice" })],
+    ],
+  ])("answers -32602 to %s, without opening a window", async (_label, params) => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    expectError(
+      await dispatch(request("eth_signTypedData_v4", params), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+
+    expect(signed).toEqual([]);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE CASE THAT MATTERS MOST ABOUT EIP-712
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: la wallet está en Anvil, jugando con dinero de mentira, y la dApp
+   * pide firmar algo cuyo dominio dice `chainId: 1`. Esa firma es válida en
+   * MAINNET. Si era un `Permit`, alguien acaba de recibir permiso para mover
+   * tus tokens de verdad — sin transacción, sin gas y sin nada en el explorador.
+   *
+   * La sensación de "estoy en una testnet, no puede pasar nada" es justo lo que
+   * hace que se firme sin mirar, así que se rechaza en vez de avisar.
+   */
+  it("refuses a signature meant for another chain, without opening a window", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender, typedData } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const forMainnet = { ...TYPED_DATA, domain: { ...TYPED_DATA.domain, chainId: 1 } };
+
+    const response = await dispatch(
+      request("eth_signTypedData_v4", signParams(forMainnet)),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expectError(response, ErrorCode.INVALID_PARAMS);
+    if (response.ok) throw new Error("expected a failure");
+    expect(response.error.message).toContain("chain 1");
+    expect(response.error.message).toContain("31337");
+
+    expect(signed).toEqual([]);
+    expect(typedData).toEqual([]);
+  });
+
+  it("accepts a chainId that matches, in either notation", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    for (const chainId of [31337, "0x7a69"]) {
+      const response = await dispatch(
+        request("eth_signTypedData_v4", signParams({ ...TYPED_DATA, domain: { ...TYPED_DATA.domain, chainId } })),
+        pageSender(LOCAL),
+        RUNTIME_ID,
+      );
+      expect(response.ok).toBe(true);
+    }
+  });
+
+  /** A domain with no chainId is legal: a login valid on any chain. */
+  it("allows a domain that names no chain at all", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const response = await dispatch(
+      request(
+        "eth_signTypedData_v4",
+        signParams({ ...TYPED_DATA, domain: { name: "Login", version: "1" } }),
+      ),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(true);
+  });
+});
+
+describe("the typed data never reaches the log", () => {
+  /**
+   * 🇪🇸 NOTA: la regla de `redactParams` se escribió en la Fase 3, cuando este
+   * método respondía 4200. Ahora existe de verdad y la regla sigue puesta sin
+   * que nadie haya tenido que acordarse de ella.
+   */
+  it("logs the call but redacts the payload", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { area, dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(
+      request("eth_signTypedData_v4", signParams()),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    const entries = logsIn(area);
+    expect(entries[0].label).toBe("eth_signTypedData_v4");
+    expect(entries[0].detail).toBe("[redacted]");
+    expect(JSON.stringify(entries)).not.toContain("Hello, Bob!");
+    expect(JSON.stringify(entries)).not.toContain("Ether Mail");
   });
 });

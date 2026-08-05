@@ -16,11 +16,19 @@
 
 import { JsonRpcProvider, toBeHex, type TransactionResponse } from "ethers";
 
-import { ErrorCode, type Hex, type NetworkConfig } from "@/types/messages";
+import {
+  ErrorCode,
+  ProviderErrors,
+  type Address,
+  type Hex,
+  type NetworkConfig,
+  type TypedDataPayload,
+} from "@/types/messages";
 
 import { ProviderError } from "./errors";
 import { deriveSigner } from "./hd-wallet";
 import type { ParsedTransaction } from "./tx";
+import { signableTypes } from "./typed-data";
 
 /** The slice of an ethers provider this module needs. */
 export interface ChainWriter {
@@ -49,11 +57,20 @@ export interface SendInput {
   transaction: ParsedTransaction;
 }
 
+export interface SignTypedDataInput {
+  phrase: string;
+  accountIndex: number;
+  address: Address;
+  payload: TypedDataPayload;
+}
+
 export interface TransactionSender {
   /** Signs and broadcasts. Resolves with the transaction hash. */
   send(input: SendInput): Promise<Hex>;
   /** Best-effort numbers for the approval window. Never throws. */
   estimate(input: Omit<SendInput, "phrase" | "accountIndex">): Promise<FeeEstimate | null>;
+  /** Signs an EIP-712 payload. Needs no network at all — see the note. */
+  signTypedData(input: SignTypedDataInput): Promise<Hex>;
 }
 
 export type ChainWriterFactory = (network: NetworkConfig) => ChainWriter;
@@ -154,7 +171,59 @@ export function createTransactionSender(
     return serialize(() => doSend(input, createWriter));
   }
 
-  return { send, estimate };
+  /**
+   * ------------------------------------------------------------------------
+   * SIGNING A MESSAGE NEEDS NO NETWORK, AND SO NO QUEUE
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: esto es criptografía local y nada más — no hay nonce que pedir, no
+   * hay fees que estimar y no hay nada que difundir. Dos consecuencias que no
+   * son obvias:
+   *
+   *   - NO pasa por la cola. La cola existe para que dos transacciones no cojan
+   *     el mismo nonce; aquí no hay nonce, así que serializar solo haría que una
+   *     firma esperase a que terminara un envío que no tiene nada que ver.
+   *   - FUNCIONA CON EL NODO APAGADO. Con Anvil parado, `eth_sendTransaction`
+   *     falla y `eth_signTypedData_v4` no. Hay una comprobación manual para eso
+   *     porque es una propiedad que sorprende.
+   */
+  async function signTypedData({
+    phrase,
+    accountIndex,
+    address,
+    payload,
+  }: SignTypedDataInput): Promise<Hex> {
+    const wallet = deriveSigner(phrase, accountIndex);
+
+    // Same belt-and-braces as doSend: the derived key must be the authorised one.
+    if (wallet.address.toLowerCase() !== address.toLowerCase()) {
+      throw new ProviderError({
+        code: ErrorCode.INTERNAL,
+        message: "The wallet derived a different account than the one authorised.",
+      });
+    }
+
+    try {
+      return (await wallet.signTypedData(
+        payload.domain,
+        signableTypes(payload),
+        payload.message,
+      )) as Hex;
+    } catch (cause) {
+      /**
+       * 🇪🇸 NOTA: si ethers rechaza el payload aquí es porque tiene algo que
+       * `typed-data.ts` no supo ver — un tipo declarado que no existe, un valor
+       * que no encaja con su tipo. Es culpa de la petición, no de la wallet, así
+       * que -32602 y no -32603. El mensaje se escribe aquí en vez de reenviar el
+       * de ethers, que puede llevar dentro el payload entero.
+       */
+      console.error("[codecrypto] could not sign the typed data:", cause);
+      throw new ProviderError(
+        ProviderErrors.invalidParams("The typed data could not be signed as declared."),
+      );
+    }
+  }
+
+  return { send, estimate, signTypedData };
 }
 
 async function doSend(
