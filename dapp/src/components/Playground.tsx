@@ -8,6 +8,7 @@ import { MethodPanel } from "@/components/MethodPanel";
 import { NoWalletsEmptyState } from "@/components/NoWalletsEmptyState";
 import { ProviderCard } from "@/components/ProviderCard";
 import { SendPanel } from "@/components/SendPanel";
+import { SignTypedDataPanel } from "@/components/SignTypedDataPanel";
 import { WalletPicker } from "@/components/WalletPicker";
 import { requestProviders, useProviders } from "@/hooks/useProviders";
 import { useProviderEvents } from "@/hooks/useProviderEvents";
@@ -123,7 +124,19 @@ function Session({ detail }: { detail: EIP6963ProviderDetail }) {
       </section>
 
       <section className="section">
-        <h2 className="section-title">5 · Public methods (no permission required)</h2>
+        <h2 className="section-title">5 · Sign a message (EIP-712)</h2>
+        <p className="section-note">
+          <code>eth_signTypedData_v4</code> signs structured data. It costs no gas and never
+          touches the chain — which is exactly why it deserves reading before approving: a{" "}
+          <code>Permit</code> is a signature, not a transaction. The result is verified here
+          with <code>verifyTypedData</code>, which recovers the signer from the signature
+          alone.
+        </p>
+        <SignTypedDataPanel provider={detail.provider} account={session.account} />
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">6 · Public methods (no permission required)</h2>
         <p className="section-note">
           These the wallet answers without any approval. Everything else answers{" "}
           <code>4200</code> until the phase that implements it.
@@ -132,7 +145,7 @@ function Session({ detail }: { detail: EIP6963ProviderDetail }) {
       </section>
 
       <section className="section">
-        <h2 className="section-title">6 · Provider events</h2>
+        <h2 className="section-title">7 · Provider events</h2>
         <p className="section-note">
           Live <code>accountsChanged</code>, <code>chainChanged</code>, <code>connect</code>{" "}
           and <code>disconnect</code>.
@@ -141,7 +154,7 @@ function Session({ detail }: { detail: EIP6963ProviderDetail }) {
       </section>
 
       <section className="section">
-        <h2 className="section-title">7 · Injection inside an iframe</h2>
+        <h2 className="section-title">8 · Injection inside an iframe</h2>
         <p className="section-note">
           The extension declares <code>all_frames</code> because plenty of dApps live inside
           an iframe, and a wallet that only injects into the top frame does not exist for

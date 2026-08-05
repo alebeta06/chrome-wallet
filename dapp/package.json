@@ -16,6 +16,7 @@
     "test:run": "vitest run"
   },
   "dependencies": {
+    "ethers": "^6.17.0",
     "next": "^15.5.22",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
