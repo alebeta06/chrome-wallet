@@ -251,9 +251,9 @@ async function doSend(
     const nonce =
       transaction.nonce !== undefined
         ? Number(BigInt(transaction.nonce))
-        : await writer.getTransactionCount(transaction.from, "pending");
+        : await viaNode(network, () => writer.getTransactionCount(transaction.from, "pending"));
 
-    const feeData = await writer.getFeeData();
+    const feeData = await viaNode(network, () => writer.getFeeData());
     const fees = resolveFees(transaction, feeData);
     if (fees === null) {
       throw new ProviderError({
@@ -265,12 +265,14 @@ async function doSend(
     const gas =
       transaction.gas ??
       (toBeHex(
-        await writer.estimateGas({
-          from: transaction.from,
-          to: transaction.to,
-          value: transaction.value,
-          data: transaction.data,
-        }),
+        await viaNode(network, () =>
+          writer.estimateGas({
+            from: transaction.from,
+            to: transaction.to,
+            value: transaction.value,
+            data: transaction.data,
+          }),
+        ),
       ) as Hex);
 
     /**
@@ -291,10 +293,10 @@ async function doSend(
       maxPriorityFeePerGas: BigInt(fees.maxPriorityFeePerGas),
     });
 
-    const response = await writer.broadcast(signed);
+    const response = await viaNode(network, () => writer.broadcast(signed));
     return response.hash as Hex;
   } catch (cause) {
-    throw toSendError(cause, network);
+    throw toSendError(cause);
   } finally {
     writer.destroy();
   }
@@ -325,6 +327,72 @@ function resolveFees(
 
 /**
  * ---------------------------------------------------------------------------
+ * WHAT IT MEANS THAT THE NODE ANSWERED
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: esta lista está al revés de como estaba, y el motivo es un bug real
+ * que encontró la comprobación manual 50.
+ *
+ * Antes se enumeraban los fallos de TRANSPORTE (`NETWORK_ERROR`, `SERVER_ERROR`,
+ * `TIMEOUT`) para mapearlos a 4901, y todo lo demás caía a un -32603 genérico.
+ * Con Anvil apagado, ethers no lanza ninguno de esos tres: lanza
+ * `code: "ECONNREFUSED"`, el errno de socket crudo. Resultado: "The wallet could
+ * not send this transaction" cuando lo que pasaba es que el nodo no estaba.
+ *
+ * Perseguir códigos de transporte es un juego que no se gana — Node da
+ * ECONNREFUSED/ENOTFOUND/ECONNRESET, undici los suyos, y Chrome envuelve el
+ * fallo de `fetch` de otra forma. Así que se enumera lo CONTRARIO: los códigos
+ * que significan que el nodo sí habló y dijo que no. Cualquier otra cosa que
+ * salga de una llamada de red es, por definición, que no llegamos a él.
+ *
+ * Es el mismo criterio que `chain.ts` usa para los saldos, que por eso sí
+ * acertaba con el 4901.
+ */
+const NODE_ANSWERED: Readonly<Record<string, string>> = {
+  INSUFFICIENT_FUNDS: "Not enough ETH in this account to cover the value plus gas.",
+  NONCE_EXPIRED: "Another transaction from this account is already in flight. Try again.",
+  REPLACEMENT_UNDERPRICED: "Another transaction from this account is already in flight. Try again.",
+  CALL_EXCEPTION: "The transaction would fail on-chain, so it was not sent.",
+  UNPREDICTABLE_GAS_LIMIT: "The transaction would fail on-chain, so it was not sent.",
+  TRANSACTION_REPLACED: "This transaction was replaced by another one.",
+};
+
+/**
+ * Runs a call that goes over the wire, and classifies whatever it throws.
+ *
+ * 🇪🇸 NOTA: envolver SOLO las llamadas de red es lo que permite invertir la
+ * lista sin mentir en el otro sentido. Un `TypeError` de un bug mío en el resto
+ * de `doSend` sigue saliendo por el -32603 genérico; lo que sale de aquí sin que
+ * el nodo lo haya explicado es que el nodo no está.
+ */
+async function viaNode<T>(network: NetworkConfig, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (cause) {
+    if (cause instanceof ProviderError) throw cause;
+
+    const explained = NODE_ANSWERED[String((cause as { code?: unknown }).code)];
+
+    // Full detail stays in the service worker console; the wire gets a code.
+    console.error("[codecrypto] an RPC call failed:", cause);
+
+    /**
+     * 🇪🇸 NOTA: los mensajes se escriben aquí en vez de reenviar el de ethers
+     * porque un error de ethers puede llevar dentro la rpcUrl con su API key, y
+     * ese objeto cruzaría hasta la dApp. Hay un test que lo comprueba.
+     */
+    throw new ProviderError(
+      explained === undefined
+        ? {
+            code: ErrorCode.CHAIN_DISCONNECTED,
+            message: `Cannot reach the RPC endpoint for ${network.name}.`,
+          }
+        : { code: ErrorCode.INTERNAL, message: explained },
+    );
+  }
+}
+
+/**
+ * ---------------------------------------------------------------------------
  * A FAILED SEND IS NEVER 4001
  * ---------------------------------------------------------------------------
  * 🇪🇸 NOTA: el usuario YA aprobó. Si un fallo de envío llegara como 4001, la
@@ -332,51 +400,16 @@ function resolveFees(
  * sin fondos: le culpa de algo que no hizo y esconde la causa real. 4001 queda
  * reservado exclusivamente a "el humano dijo que no".
  *
- * Los mensajes se escriben aquí en vez de reenviar el de ethers porque
- * `toSerializedError` redacta cualquier error no tipado a un -32603 genérico
- * cuando el que pregunta es una web — con razón, porque un error de ethers puede
- * llevar dentro la rpcUrl con su API key.
+ * Lo que llega aquí ya viene clasificado por `viaNode`. Este último catch es
+ * para lo que NO salió de la red: un bug propio en la derivación o en la firma.
  */
-function toSendError(cause: unknown, network: NetworkConfig): ProviderError {
+function toSendError(cause: unknown): ProviderError {
   if (cause instanceof ProviderError) return cause;
 
   console.error("[codecrypto] the transaction could not be sent:", cause);
 
-  const code = (cause as { code?: unknown }).code;
-
-  switch (code) {
-    case "INSUFFICIENT_FUNDS":
-      return new ProviderError({
-        code: ErrorCode.INTERNAL,
-        message: "Not enough ETH in this account to cover the value plus gas.",
-      });
-
-    case "NONCE_EXPIRED":
-    case "REPLACEMENT_UNDERPRICED":
-      return new ProviderError({
-        code: ErrorCode.INTERNAL,
-        message: "Another transaction from this account is already in flight. Try again.",
-      });
-
-    case "CALL_EXCEPTION":
-    case "UNPREDICTABLE_GAS_LIMIT":
-      return new ProviderError({
-        code: ErrorCode.INTERNAL,
-        message: "The transaction would fail on-chain, so it was not sent.",
-      });
-
-    case "NETWORK_ERROR":
-    case "SERVER_ERROR":
-    case "TIMEOUT":
-      return new ProviderError({
-        code: ErrorCode.CHAIN_DISCONNECTED,
-        message: `Cannot reach the RPC endpoint for ${network.name}.`,
-      });
-
-    default:
-      return new ProviderError({
-        code: ErrorCode.INTERNAL,
-        message: "The wallet could not send this transaction.",
-      });
-  }
+  return new ProviderError({
+    code: ErrorCode.INTERNAL,
+    message: "The wallet could not send this transaction.",
+  });
 }

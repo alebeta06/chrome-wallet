@@ -302,6 +302,7 @@ describe("what the dApp is told when a send fails", () => {
     ["NONCE_EXPIRED", ErrorCode.INTERNAL, "already in flight"],
     ["REPLACEMENT_UNDERPRICED", ErrorCode.INTERNAL, "already in flight"],
     ["CALL_EXCEPTION", ErrorCode.INTERNAL, "would fail on-chain"],
+    ["UNPREDICTABLE_GAS_LIMIT", ErrorCode.INTERNAL, "would fail on-chain"],
     ["NETWORK_ERROR", ErrorCode.CHAIN_DISCONNECTED, "Cannot reach"],
     ["SERVER_ERROR", ErrorCode.CHAIN_DISCONNECTED, "Cannot reach"],
     ["TIMEOUT", ErrorCode.CHAIN_DISCONNECTED, "Cannot reach"],
@@ -315,11 +316,112 @@ describe("what the dApp is told when a send fails", () => {
     expect(error.serialized.message).toContain(fragment);
   });
 
-  it("falls back to -32603 for an error it does not recognise", async () => {
+  /**
+   * ------------------------------------------------------------------------
+   * THE BUG MANUAL CHECK 50 FOUND
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: con Anvil apagado, ethers NO lanza `NETWORK_ERROR` — lanza
+   * `code: "ECONNREFUSED"`, el errno de socket crudo. Reproducido contra un
+   * puerto muerto antes de tocar nada. Con el mapeo anterior, que enumeraba los
+   * fallos de transporte, esto caía al -32603 genérico y la dApp recibía "The
+   * wallet could not send this transaction" cuando lo que pasaba era que el nodo
+   * no estaba.
+   *
+   * Importa por diagnóstico: con 4901 la dApp sabe que es la red y puede sugerir
+   * reintentar; con -32603 no puede distinguirlo de un bug de la wallet.
+   */
+  it.each([
+    ["ECONNREFUSED", "the node is not running"],
+    ["ENOTFOUND", "the host does not resolve"],
+    ["ECONNRESET", "the connection dropped"],
+    ["EAI_AGAIN", "dns is failing"],
+    ["UND_ERR_CONNECT_TIMEOUT", "undici gave up"],
+  ])("maps the raw socket error %s to 4901", async (socketCode, _why) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { sender } = fakeChain({ failWith: Object.assign(new Error("connect"), { code: socketCode }) });
+
+    const error = await expectCode(send(sender), ErrorCode.CHAIN_DISCONNECTED);
+
+    expect(error.serialized.message).toContain("Cannot reach");
+    expect(error.serialized.message).toContain("Anvil Local");
+  });
+
+  /**
+   * 🇪🇸 NOTA: el fallo con Anvil apagado ocurre en `getTransactionCount`, no al
+   * difundir — antes ni se llega a firmar. Se cubren los cuatro puntos de red
+   * porque cualquiera de ellos puede ser el primero en toparse con el nodo caído.
+   */
+  it.each(["getTransactionCount", "getFeeData", "estimateGas", "broadcast"] as const)(
+    "maps an unreachable node to 4901 when %s is the call that fails",
+    async (failing) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const dead = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+
+      const writer: ChainWriter = {
+        getTransactionCount: async () => {
+          if (failing === "getTransactionCount") throw dead;
+          return 0;
+        },
+        getFeeData: async () => {
+          if (failing === "getFeeData") throw dead;
+          return { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n };
+        },
+        estimateGas: async () => {
+          if (failing === "estimateGas") throw dead;
+          return 21_000n;
+        },
+        broadcast: async () => {
+          if (failing === "broadcast") throw dead;
+          return { hash: "0xok" } as never;
+        },
+        destroy: () => {},
+      };
+
+      const error = await expectCode(
+        createTransactionSender(() => writer).send({
+          network: ANVIL,
+          phrase: PHRASE,
+          accountIndex: 0,
+          transaction: transaction(),
+        }),
+        ErrorCode.CHAIN_DISCONNECTED,
+      );
+
+      expect(error.serialized.message).toContain("Cannot reach");
+    },
+  );
+
+  /**
+   * 🇪🇸 NOTA: el control de la inversión. Ahora que "todo lo que no reconozco es
+   * nodo caído" solo aplica DENTRO de las llamadas de red, un bug propio fuera
+   * de ellas tiene que seguir saliendo por el -32603 genérico — si no, un error
+   * de la wallet se reportaría como problema de red y nadie lo buscaría donde
+   * está.
+   */
+  it("does not blame the network for a failure outside a network call", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { sender } = fakeChain();
+
+    // A bad phrase blows up in derivation, before any network call.
+    const error = await expectCode(
+      sender.send({
+        network: ANVIL,
+        phrase: "not a real mnemonic at all",
+        accountIndex: 0,
+        transaction: transaction(),
+      }),
+      ErrorCode.INVALID_PARAMS,
+    );
+
+    expect(error.serialized.message).not.toContain("Cannot reach");
+  });
+
+  it("treats an unexplained failure from a network call as unreachable", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { sender } = fakeChain({ failWith: new Error("something new") });
 
-    await expectCode(send(sender), ErrorCode.INTERNAL);
+    // No code at all: it came out of a network call, so it is unreachable.
+    await expectCode(send(sender), ErrorCode.CHAIN_DISCONNECTED);
   });
 
   /**
@@ -333,10 +435,12 @@ describe("what the dApp is told when a send fails", () => {
       failWith: new Error("could not reach http://localhost:8545?apiKey=secret"),
     });
 
-    const error = await expectCode(send(sender), ErrorCode.INTERNAL);
+    const error = await expectCode(send(sender), ErrorCode.CHAIN_DISCONNECTED);
 
     expect(JSON.stringify(error.serialized)).not.toContain("apiKey");
     expect(JSON.stringify(error.serialized)).not.toContain("8545");
+    // Only the network's NAME travels, never its URL.
+    expect(error.serialized.message).toContain("Anvil Local");
   });
 });
 
@@ -377,6 +481,70 @@ describe("estimate", () => {
     });
 
     expect(estimate).toBeNull();
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * estimate() DEGRADES VISIBLY, IT DOES NOT SWALLOW
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: comprobado a raíz de la comprobación 50, no dado por hecho. Con el
+   * nodo caído `estimate` devuelve null Y deja el error en la consola del
+   * service worker. El null no es tragárselo: es lo que hace que la ventana
+   * enseñe "no se pudo estimar" en vez de un número inventado, que era la
+   * decisión de la Fase 6.
+   *
+   * Lo que SÍ pierde por el camino es la distinción entre "no llego al nodo" y
+   * "el nodo dice que esta transacción revertiría". Las dos acaban en el mismo
+   * null y la ventana dice lo mismo. Se asume: el envío posterior sí las
+   * distingue —4901 contra -32603— y la ventana no bloquea en ninguno de los dos
+   * casos, así que la diferencia no cambia lo que el usuario puede hacer ahora.
+   */
+  it("returns null and logs when the node refuses the connection", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dead = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+
+    const writer: ChainWriter = {
+      getTransactionCount: async () => 0,
+      getFeeData: async () => {
+        throw dead;
+      },
+      estimateGas: async () => 21_000n,
+      broadcast: async () => ({ hash: "0x" }) as never,
+      destroy: () => {},
+    };
+
+    const estimate = await createTransactionSender(() => writer).estimate({
+      network: ANVIL,
+      transaction: transaction(),
+    });
+
+    expect(estimate).toBeNull();
+    // Not swallowed: the reason is in the service worker console.
+    expect(logged).toHaveBeenCalled();
+  });
+
+  it("releases the provider even when the node is unreachable", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let destroyed = 0;
+
+    const writer: ChainWriter = {
+      getTransactionCount: async () => 0,
+      getFeeData: async () => {
+        throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      },
+      estimateGas: async () => 21_000n,
+      broadcast: async () => ({ hash: "0x" }) as never,
+      destroy: () => {
+        destroyed += 1;
+      },
+    };
+
+    await createTransactionSender(() => writer).estimate({
+      network: ANVIL,
+      transaction: transaction(),
+    });
+
+    expect(destroyed).toBe(1);
   });
 
   it("never runs through the send queue", async () => {

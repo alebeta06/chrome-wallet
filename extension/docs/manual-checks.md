@@ -847,6 +847,19 @@ Para Anvil e intenta enviar. Dos cosas:
 Bloquear la aprobación habría convertido un parpadeo del nodo en "la wallet no
 deja operar".
 
+> 🇪🇸 NOTA: esta comprobación **encontró un bug de verdad** en la Fase 7, y
+> conviene no perder el motivo. El mapeo de errores enumeraba los códigos de
+> transporte de ethers (`NETWORK_ERROR`, `SERVER_ERROR`, `TIMEOUT`) y mandaba
+> todo lo demás a un -32603 genérico. Pero con el nodo caído ethers no lanza
+> ninguno de esos tres: lanza `code: "ECONNREFUSED"`, el errno de socket crudo.
+>
+> Perseguir códigos de transporte no se gana — Node da uno, undici otro y Chrome
+> envuelve el fallo de `fetch` de otra forma. La lista está ahora **al revés**:
+> se enumeran los códigos que significan que el nodo SÍ contestó
+> (`INSUFFICIENT_FUNDS`, `CALL_EXCEPTION`…) y cualquier otra cosa que salga de
+> una llamada de red es, por definición, que no llegamos a él. Es el mismo
+> criterio que `chain.ts` ya usaba para los saldos, y por eso ésos sí acertaban.
+
 ## 45. Los params de firma no llegan al registro
 
 ```js
