@@ -25,6 +25,7 @@ import type {
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
+import type { NetworkStore } from "@/lib/network-store";
 import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID, defaultNetworks } from "@/lib/networks";
 import { ProviderError } from "@/lib/errors";
 import type { BalanceAtReader, BalanceReader } from "@/lib/chain";
@@ -148,6 +149,25 @@ function fakeApprovals(outcome: { approve: number } | { reject: SerializedProvid
   };
 
   return { approvals, asked, signed };
+}
+
+/**
+ * A store whose active chain is not in its own catalogue.
+ *
+ * 🇪🇸 NOTA: ese estado no se puede producir por storage, porque la migración lo
+ * corrige al leer. Existe para cubrir la rama defensiva de
+ * `resolveActiveNetwork`, que protege contra que alguien escriba `cc:chainId`
+ * sin pasar por el store.
+ */
+function brokenNetworkStore(): NetworkStore {
+  return {
+    read: async () => ({ networks: defaultNetworks(), chainId: "0xdead" }),
+    migrate: async () => ({ networks: defaultNetworks(), chainId: "0xdead" }),
+    active: async () => undefined,
+    setActive: async () => false,
+    upsert: async () => defaultNetworks(),
+    remove: async () => ({ ok: false, reason: "not-found" }),
+  };
 }
 
 /** The activity log as it currently stands in storage. */
@@ -626,7 +646,22 @@ describe("wallet_getBalances", () => {
     expect(response.ok).toBe(false);
   });
 
-  it("answers 4902 when cc:chainId is not in the catalogue", async () => {
+  /**
+   * ------------------------------------------------------------------------
+   * A DANGLING ACTIVE CHAIN HEALS. IT DOES NOT BRICK THE WALLET
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: hasta la Fase 8 esto respondía 4902 y era lo mejor que se podía
+   * hacer, porque el catálogo vivía en el código y un `cc:chainId` colgando no
+   * tenía arreglo posible. Con el catálogo en storage sí lo tiene: la migración
+   * clampa el activo al DEFAULT cuando no existe.
+   *
+   * El cambio importa porque el caso deja de ser hipotético. Borrar una red o
+   * que se revoque un permiso puede dejar el activo apuntando a nada, y una
+   * wallet que responde 4902 a CADA lectura de saldo por eso está inutilizable
+   * sin que el usuario tenga forma de saber por qué. Caer a Anvil es visible en
+   * el selector y reversible en un clic.
+   */
+  it("falls back to Anvil when cc:chainId points at a network that is gone", async () => {
     const reader = vi.fn<BalanceReader>(async () => ({}));
     const { dispatch } = setup({ ...LOADED_WALLET, "cc:chainId": "0xdead" }, reader);
 
@@ -636,7 +671,34 @@ describe("wallet_getBalances", () => {
       RUNTIME_ID,
     );
 
-    expectError(response, ErrorCode.UNRECOGNIZED_CHAIN);
+    expect(response.ok).toBe(true);
+    expect(reader).toHaveBeenCalledWith(
+      expect.objectContaining({ chainId: ANVIL_CHAIN_ID }),
+      [ANVIL_FIRST],
+    );
+  });
+
+  /**
+   * 🇪🇸 NOTA: la rama del 4902 sigue existiendo y ya no se puede alcanzar por
+   * storage — la migración lo impide. Se cubre inyectando un store roto, que es
+   * lo que sería el día que alguien escriba `cc:chainId` sin pasar por él. Sin
+   * este test, la rama quedaría muerta y nadie se enteraría de que dejó de
+   * funcionar.
+   */
+  it("still answers 4902 if the catalogue and the active chain disagree", async () => {
+    const reader = vi.fn<BalanceReader>(async () => ({}));
+    const { dispatch } = setup(LOADED_WALLET, reader, undefined, {
+      networks: brokenNetworkStore(),
+    });
+
+    expectError(
+      await dispatch(
+        request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]),
+        uiSender(),
+        RUNTIME_ID,
+      ),
+      ErrorCode.UNRECOGNIZED_CHAIN,
+    );
     expect(reader).not.toHaveBeenCalled();
   });
 
@@ -1078,14 +1140,17 @@ describe("eth_getBalance", () => {
     expect(reader).not.toHaveBeenCalled();
   });
 
-  it("answers 4902 when cc:chainId is not in the catalogue", async () => {
+  /** Same healing as wallet_getBalances; see the note there. */
+  it("falls back to Anvil when cc:chainId points at a network that is gone", async () => {
     const { reader, dispatch } = balanceSetup({ ...LOADED_WALLET, "cc:chainId": "0xdead" });
 
-    expectError(
-      await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID),
-      ErrorCode.UNRECOGNIZED_CHAIN,
+    await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID);
+
+    expect(reader).toHaveBeenCalledWith(
+      expect.objectContaining({ chainId: ANVIL_CHAIN_ID }),
+      ANVIL_FIRST,
+      "latest",
     );
-    expect(reader).not.toHaveBeenCalled();
   });
 
   it("surfaces an unreachable node as 4901", async () => {
@@ -1923,12 +1988,34 @@ describe("eth_sendTransaction refusals that never reach the user", () => {
     expect(sent).toEqual([]);
   });
 
-  it("answers 4902 when the active chain is not in the catalogue", async () => {
+  /**
+   * 🇪🇸 NOTA: lo que se fija aquí es que la ventana de firma enseña la red
+   * REAL contra la que se va a firmar. Con el activo colgando, la migración cae
+   * a Anvil, y la solicitud tiene que llevar el chainId de Anvil — no el
+   * `0xdead` que había en storage. Enseñar una red y firmar contra otra es el
+   * fallo que la comprobación de deriva de chainId existe para evitar.
+   */
+  it("signs against Anvil when the active chain is gone, and says so", async () => {
     const { approvals, signed } = fakeApprovals({ approve: 0 });
     const { sender } = fakeSender();
     const { dispatch } = setup({ ...CONNECTED, "cc:chainId": "0xdead" }, undefined, undefined, {
       approvals,
       sender,
+    });
+
+    await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID);
+
+    expect(signed).toHaveLength(1);
+    expect(signed[0].chainId).toBe(ANVIL_CHAIN_ID);
+  });
+
+  it("answers 4902 if the catalogue and the active chain disagree", async () => {
+    const { approvals, signed } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { dispatch } = setup(CONNECTED, undefined, undefined, {
+      approvals,
+      sender,
+      networks: brokenNetworkStore(),
     });
 
     expectError(

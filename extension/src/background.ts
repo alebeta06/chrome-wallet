@@ -21,6 +21,7 @@ import { createApprovalCoordinator, type ApprovalWindows } from "@/lib/approvals
 import { pendingBadgeText } from "@/lib/badge";
 import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
+import { createNetworkStore } from "@/lib/network-store";
 import { createTransactionSender } from "@/lib/signer";
 import { createWalletStorage, type WalletStorage } from "@/lib/storage";
 
@@ -133,9 +134,39 @@ async function activeOrigin(): Promise<Origin | null> {
 const approvals = createApprovalCoordinator({ storage, windows });
 const emit = createEventEmitter(tabs);
 const sender = createTransactionSender();
-const dispatch = createDispatcher({ storage, approvals, emit, sender, activeOrigin });
+
+/**
+ * 🇪🇸 NOTA: UNA instancia, creada aquí y pasada al despachador. El store lleva
+ * dentro la cadena que serializa las escrituras de `cc:networks`, y dos
+ * instancias serían dos cadenas que no se ven entre sí — que es exactamente no
+ * tener cadena. Es la misma razón por la que el coordinador de aprobaciones
+ * también se construye una sola vez.
+ */
+const networks = createNetworkStore(storage);
+
+const dispatch = createDispatcher({ storage, approvals, emit, sender, activeOrigin, networks });
 
 console.log(`[${PROTOCOL}] background service worker alive`);
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE CATALOGUE IS BROUGHT UP TO SHAPE ON EVERY START, AND WRITES NOTHING WHEN
+ * THERE IS NOTHING TO CHANGE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: mismo patrón que `ensureProviderUuid` de abajo, y por el mismo
+ * motivo: el service worker arranca de cero constantemente, así que lo que se
+ * haga "al instalar" tiene que poder ejecutarse cien veces sin efecto. La
+ * migración es idempotente y solo escribe si algo cambió — si escribiera
+ * siempre, cada despertar del worker dispararía `chrome.storage.onChanged` y
+ * refrescaría la UI abierta sin motivo.
+ *
+ * Que falle no puede impedir que el worker arranque: `read()` migra al vuelo de
+ * todas formas, así que la wallet sigue funcionando y lo único que se pierde es
+ * dejarlo persistido hasta el siguiente arranque.
+ */
+void networks.migrate().catch((cause: unknown) => {
+  console.error(`[${PROTOCOL}] could not migrate the network catalogue:`, cause);
+});
 
 // ============================================================================
 // The badge (spec 32)

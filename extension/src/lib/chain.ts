@@ -4,7 +4,7 @@
  * imports ethers — and, like hd-wallet.ts, nothing under src/ui may touch it.
  */
 
-import { JsonRpcProvider, toBeHex } from "ethers";
+import { JsonRpcProvider, Network, toBeHex } from "ethers";
 
 import { ErrorCode, type Address, type BlockTag, type Hex, type NetworkConfig } from "@/types/messages";
 import { ProviderError } from "./errors";
@@ -26,18 +26,46 @@ export type BalanceAtReader = (
 ) => Promise<Hex>;
 
 /**
- * 🇪🇸 NOTA: un provider POR PETICIÓN, nunca en una variable de módulo. El
- * service worker se suspende cuando le apetece y se lleva por delante el
- * provider a medio uso; y si el usuario cambia de red, un provider cacheado
- * seguiría consultando la anterior.
+ * The one place a provider is built. Shared with signer.ts.
  *
- * `batchMaxCount: 1` desactiva el batching JSON-RPC: dRPC rechaza los batches
- * y hará falta en Sepolia. `staticNetwork: true` evita que ethers añada un
- * eth_chainId de validación a cada llamada, que en un worker que arranca de
- * cero constantemente es una petición de red por cada consulta.
+ * ---------------------------------------------------------------------------
+ * A PROVIDER PER REQUEST, AND NO CACHE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: nunca en una variable de módulo. El service worker se suspende
+ * cuando le apetece y se lleva por delante el provider a medio uso, así que una
+ * caché en memoria del worker es la carrera de la Fase 6 otra vez: estado
+ * compartido que a veces está y a veces no, sin nada que avise de cuál de las
+ * dos cosas. Y una caché por chainId seguiría sirviendo la conexión vieja
+ * después de que el usuario editara el RPC de esa red.
+ *
+ * ---------------------------------------------------------------------------
+ * LAS DOS OPCIONES SON NECESARIAS, Y LA RED TAMBIÉN. MEDIDO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: `batchMaxCount: 1` desactiva el batching JSON-RPC porque dRPC
+ * rechaza los batches, y eso hace falta en Sepolia.
+ *
+ * `staticNetwork: true` NO basta por sí solo, y ésta es la parte que sorprende.
+ * Lo que hace es decirle a ethers "da por buena la red que te di en el
+ * constructor" — si no le diste ninguna, no hay nada que dar por bueno y ethers
+ * la detecta con un `eth_chainId` de verdad. Contando peticiones contra un
+ * servidor HTTP local, con dos `getBalance` por provider y ethers 6.17.0:
+ *
+ *   url, undefined, { staticNetwork: true }   → 1 eth_chainId  ← lo que había
+ *   url, Network,   { staticNetwork: true }   → 0 eth_chainId  ← esto
+ *   url, Network,   sin staticNetwork         → 2 eth_chainId  (¡uno por llamada!)
+ *
+ * O sea que las dos piezas van juntas: la red en el constructor y la opción que
+ * hace que ethers se la crea. Con providers por petición, la forma de antes
+ * costaba una ida y vuelta EXTRA en cada consulta de saldo — y el popup consulta
+ * cada 5 s. Hay un test que cuenta las llamadas al transporte para que nadie
+ * quite ninguna de las dos por parecerle redundante.
+ *
+ * `Network.from` con un bigint no registrado devuelve una red "unknown" con ese
+ * chainId en vez de lanzar, así que esto vale igual para una red que el usuario
+ * añadió en runtime.
  */
-function createProvider(network: NetworkConfig): JsonRpcProvider {
-  return new JsonRpcProvider(network.rpcUrl, undefined, {
+export function createRpcProvider(network: NetworkConfig): JsonRpcProvider {
+  return new JsonRpcProvider(network.rpcUrl, Network.from(BigInt(network.chainId)), {
     batchMaxCount: 1,
     staticNetwork: true,
   });
@@ -63,7 +91,7 @@ function unreachable(network: NetworkConfig, cause: unknown): ProviderError {
 }
 
 export const fetchBalances: BalanceReader = async (network, addresses) => {
-  const provider = createProvider(network);
+  const provider = createRpcProvider(network);
 
   try {
     const values = await Promise.all(addresses.map((address) => provider.getBalance(address)));
@@ -93,7 +121,7 @@ export const fetchBalances: BalanceReader = async (network, addresses) => {
  * de correcta, que es peor que un error.
  */
 export const fetchBalanceAt: BalanceAtReader = async (network, address, blockTag) => {
-  const provider = createProvider(network);
+  const provider = createRpcProvider(network);
 
   try {
     return toBeHex(await provider.getBalance(address, blockTag)) as Hex;

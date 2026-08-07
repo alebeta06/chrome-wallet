@@ -14,7 +14,7 @@
  * cálculo del nonce y el mapeo de errores sin un nodo delante.
  */
 
-import { JsonRpcProvider, toBeHex, type TransactionResponse } from "ethers";
+import { toBeHex, type TransactionResponse } from "ethers";
 
 import {
   ErrorCode,
@@ -25,6 +25,7 @@ import {
   type TypedDataPayload,
 } from "@/types/messages";
 
+import { createRpcProvider } from "./chain";
 import { ProviderError } from "./errors";
 import { deriveSigner } from "./hd-wallet";
 import type { ParsedTransaction } from "./tx";
@@ -76,16 +77,15 @@ export interface TransactionSender {
 export type ChainWriterFactory = (network: NetworkConfig) => ChainWriter;
 
 /**
- * 🇪🇸 NOTA: mismas opciones que `chain.ts` y por los mismos motivos —
- * `batchMaxCount: 1` porque dRPC rechaza los batches, `staticNetwork: true` para
- * no añadir un `eth_chainId` de validación a cada llamada en un worker que
- * arranca de cero constantemente.
+ * 🇪🇸 NOTA: el provider se construye con `createRpcProvider` de `chain.ts` en vez
+ * de repetir aquí las opciones. Eran dos copias de la misma configuración, y la
+ * Fase 8 demostró por qué eso es un problema: al medir que faltaba pasar la red
+ * en el constructor, una copia se habría arreglado y la otra no — con el
+ * resultado de que leer un saldo costaría una petición y firmar costaría dos,
+ * sin nada que lo delatara.
  */
 export const createChainWriter: ChainWriterFactory = (network) => {
-  const provider = new JsonRpcProvider(network.rpcUrl, undefined, {
-    batchMaxCount: 1,
-    staticNetwork: true,
-  });
+  const provider = createRpcProvider(network);
 
   return {
     getTransactionCount: (address, blockTag) => provider.getTransactionCount(address, blockTag),

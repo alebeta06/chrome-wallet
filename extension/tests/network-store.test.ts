@@ -1,0 +1,228 @@
+import { describe, expect, it } from "vitest";
+
+import type { NetworkConfig } from "@/types/messages";
+import { createNetworkStore, type NetworkStore } from "@/lib/network-store";
+import {
+  ANVIL_CHAIN_ID,
+  DEFAULT_CHAIN_ID,
+  SEPOLIA_CHAIN_ID,
+  findNetwork,
+  toNetworkConfig,
+} from "@/lib/networks";
+import { createWalletStorage, type StorageArea } from "@/lib/storage";
+import { createMemoryStorageArea } from "./helpers/memory-storage-area";
+
+function network(chainId: string, rpcUrl: string, name = `Chain ${chainId}`): NetworkConfig {
+  return toNetworkConfig(
+    {
+      chainId: chainId as NetworkConfig["chainId"],
+      name,
+      rpcUrl,
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      explorerUrl: null,
+    },
+    1_000,
+  );
+}
+
+const POLYGON = network("0x89", "https://polygon-rpc.com", "Polygon");
+const BASE = network("0x2105", "https://mainnet.base.org", "Base");
+
+/** Wraps a storage area so a test can assert how many writes really happened. */
+function countingArea(seed: Record<string, unknown> = {}): StorageArea & { writes: number } {
+  const inner = createMemoryStorageArea(seed);
+  const wrapper = {
+    writes: 0,
+    get: (keys: string[]) => inner.get(keys),
+    set: (items: Record<string, unknown>) => {
+      wrapper.writes += 1;
+      return inner.set(items);
+    },
+    remove: (keys: string[]) => inner.remove(keys),
+  };
+  return wrapper;
+}
+
+function storeOn(area: StorageArea): NetworkStore {
+  return createNetworkStore(createWalletStorage(area));
+}
+
+describe("createNetworkStore", () => {
+  describe("migrate", () => {
+    it("seeds the catalogue on a fresh install", async () => {
+      const area = countingArea();
+      const { networks, chainId } = await storeOn(area).migrate();
+
+      expect(networks.map((entry) => entry.chainId)).toEqual([ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID]);
+      expect(chainId).toBe(DEFAULT_CHAIN_ID);
+      expect(area.writes).toBe(1);
+    });
+
+    /**
+     * ------------------------------------------------------------------------
+     * A NO-OP MIGRATION WRITES NOTHING
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: esto corre en cada arranque del service worker, o sea decenas de
+     * veces al día. Una escritura inútil dispara `chrome.storage.onChanged`, que
+     * es lo que recalcula el badge y despierta a la UI abierta. Escribir "por si
+     * acaso" convertiría cada despertar del worker en un refresco visible.
+     */
+    it("writes nothing the second time", async () => {
+      const area = countingArea();
+      const store = storeOn(area);
+
+      await store.migrate();
+      const before = area.writes;
+      await store.migrate();
+
+      expect(area.writes).toBe(before);
+    });
+
+    it("keeps the active network across a restart", async () => {
+      const area = countingArea();
+      const store = storeOn(area);
+
+      await store.migrate();
+      await store.setActive(SEPOLIA_CHAIN_ID);
+
+      // A new store is what the worker gets after being suspended.
+      expect((await storeOn(area).migrate()).chainId).toBe(SEPOLIA_CHAIN_ID);
+    });
+  });
+
+  describe("read", () => {
+    it("returns the current shape without writing", async () => {
+      const area = countingArea({ "cc:networks": [POLYGON] });
+      const { networks } = await storeOn(area).read();
+
+      expect(networks).toHaveLength(3);
+      expect(area.writes).toBe(0);
+    });
+  });
+
+  describe("setActive", () => {
+    it("switches to a network in the catalogue", async () => {
+      const store = storeOn(countingArea());
+      await store.migrate();
+
+      await expect(store.setActive(SEPOLIA_CHAIN_ID)).resolves.toBe(true);
+      expect((await store.read()).chainId).toBe(SEPOLIA_CHAIN_ID);
+    });
+
+    it("refuses a chain that is not in the catalogue", async () => {
+      const store = storeOn(countingArea());
+      await store.migrate();
+
+      await expect(store.setActive("0xdead")).resolves.toBe(false);
+      expect((await store.read()).chainId).toBe(DEFAULT_CHAIN_ID);
+    });
+  });
+
+  describe("remove", () => {
+    it("removes a user network and leaves the active one alone", async () => {
+      const store = storeOn(countingArea());
+      await store.upsert(POLYGON);
+
+      await expect(store.remove(POLYGON.chainId)).resolves.toEqual({
+        ok: true,
+        networks: expect.any(Array),
+      });
+      expect(findNetwork((await store.read()).networks, POLYGON.chainId)).toBeUndefined();
+      expect((await store.read()).chainId).toBe(DEFAULT_CHAIN_ID);
+    });
+
+    it("refuses the active network without touching storage", async () => {
+      const store = storeOn(countingArea());
+      await store.upsert(POLYGON);
+      await store.setActive(POLYGON.chainId);
+
+      await expect(store.remove(POLYGON.chainId)).resolves.toEqual({
+        ok: false,
+        reason: "active",
+      });
+      expect(findNetwork((await store.read()).networks, POLYGON.chainId)).toBeDefined();
+    });
+
+    it("refuses a built-in", async () => {
+      const store = storeOn(countingArea());
+      await store.migrate();
+
+      await expect(store.remove(SEPOLIA_CHAIN_ID)).resolves.toEqual({
+        ok: false,
+        reason: "built-in",
+      });
+    });
+  });
+
+  /**
+   * ---------------------------------------------------------------------------
+   * THE RACE. NO AWAIT BETWEEN THE CALLS
+   * ---------------------------------------------------------------------------
+   * 🇪🇸 NOTA: la lección de la Fase 6, y la razón de que estos tests se escriban
+   * así. Un `await` entre las dos llamadas las serializaría ARTIFICIALMENTE y el
+   * test pasaría con o sin cadena — probando un escenario que el navegador no
+   * produce. `chrome.runtime.onMessage` despacha concurrente: dos dApps dando de
+   * alta una red a la vez salen a la vez.
+   *
+   * Sin la cadena serializada de `network-store.ts`, las dos lecturas ven el
+   * mismo catálogo y la segunda escritura se lleva por delante a la primera. El
+   * síntoma no es un error: la red simplemente no está.
+   */
+  describe("concurrent writes", () => {
+    it("keeps both networks when two are added at once", async () => {
+      const store = storeOn(countingArea());
+      await store.migrate();
+
+      await Promise.all([store.upsert(POLYGON), store.upsert(BASE)]);
+
+      const { networks } = await store.read();
+      expect(findNetwork(networks, POLYGON.chainId)).toBeDefined();
+      expect(findNetwork(networks, BASE.chainId)).toBeDefined();
+    });
+
+    it("does not resurrect a network removed while another was added", async () => {
+      const store = storeOn(countingArea());
+      await store.upsert(POLYGON);
+
+      await Promise.all([store.remove(POLYGON.chainId), store.upsert(BASE)]);
+
+      const { networks } = await store.read();
+      expect(findNetwork(networks, POLYGON.chainId)).toBeUndefined();
+      expect(findNetwork(networks, BASE.chainId)).toBeDefined();
+    });
+
+    /**
+     * 🇪🇸 NOTA: se afirman los DOS efectos, no que el invariante se sostenga. Sin
+     * cadena, una escritura pisa a la otra y se pierde uno de los dos — o el
+     * cambio de red, o el alta— pero el catálogo resultante sigue conteniendo su
+     * propia red activa en los dos casos. Una aserción sobre el invariante
+     * pasaría con el bug delante, que es la peor clase de test.
+     */
+    it("keeps both the switch and the addition when they race", async () => {
+      const store = storeOn(countingArea());
+      await store.upsert(POLYGON);
+
+      await Promise.all([store.setActive(POLYGON.chainId), store.upsert(BASE)]);
+
+      const { networks, chainId } = await store.read();
+      expect(chainId).toBe(POLYGON.chainId);
+      expect(findNetwork(networks, BASE.chainId)).toBeDefined();
+    });
+
+    it("survives ten simultaneous additions", async () => {
+      const store = storeOn(countingArea());
+      await store.migrate();
+
+      const many = Array.from({ length: 10 }, (_unused, index) =>
+        network(`0x${(1000 + index).toString(16)}`, `https://rpc-${index}.example`),
+      );
+
+      await Promise.all(many.map((entry) => store.upsert(entry)));
+
+      const { networks } = await store.read();
+      for (const entry of many) {
+        expect(findNetwork(networks, entry.chainId)).toBeDefined();
+      }
+    });
+  });
+});

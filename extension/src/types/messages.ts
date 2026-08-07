@@ -163,10 +163,15 @@ export interface NetworkConfig {
   chainId: Hex;
   name: string;
   rpcUrl: string;
+  /** Always mirrors nativeCurrency.symbol. Nothing may write one without the other. */
   symbol: string;
   explorerUrl: string | null;
   /** Built-in networks cannot be removed by the user. */
   builtIn: boolean;
+  /** 0 for the built-ins: they were seeded, not added. */
+  addedAt?: number;
+  /** EIP-3085 shape. Optional so entries stored before phase 8 stay valid. */
+  nativeCurrency?: { name: string; symbol: string; decimals: number };
 }
 
 export interface ConnectedSite {

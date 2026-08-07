@@ -47,7 +47,8 @@ import { appendLog, createLogEntry, redactParams } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
-import { DEFAULT_CHAIN_ID, defaultNetworks } from "./networks";
+import { createNetworkStore, type NetworkStore } from "./network-store";
+import { DEFAULT_CHAIN_ID } from "./networks";
 import {
   connectSite,
   disconnectSite,
@@ -80,6 +81,16 @@ export interface DispatcherDeps {
    * Returns null when that is an extension page or nothing at all.
    */
   activeOrigin?: () => Promise<Origin | null>;
+  /**
+   * Phase 8. The persisted network catalogue.
+   *
+   * 🇪🇸 NOTA: el worker tiene que pasar SU instancia, no dejar que se cree aquí
+   * la de por defecto. El store lleva dentro la cadena que serializa las
+   * escrituras de `cc:networks`, y dos instancias son dos cadenas que no se ven
+   * entre sí — o sea, no tener cadena. El valor por defecto existe para los
+   * tests, donde el despachador es el único que escribe.
+   */
+  networks?: NetworkStore;
 }
 
 /** Everything the handlers are allowed to reach. Nothing is a module global. */
@@ -91,6 +102,7 @@ interface HandlerContext {
   emit: EventEmitter;
   sender: TransactionSender;
   activeOrigin: () => Promise<Origin | null>;
+  networks: NetworkStore;
 }
 
 /**
@@ -147,6 +159,7 @@ export function createDispatcher({
   emit = NO_EMIT,
   sender = NO_SENDER,
   activeOrigin = () => Promise.resolve(null),
+  networks = createNetworkStore(storage),
 }: DispatcherDeps): Dispatcher {
   const deps: HandlerContext = {
     storage,
@@ -156,6 +169,7 @@ export function createDispatcher({
     emit,
     sender,
     activeOrigin,
+    networks,
   };
 
   return async function dispatch(message, sender, runtimeId) {
@@ -251,16 +265,16 @@ async function handle(
   method: string,
   params: unknown[],
 ): Promise<unknown> {
-  const { storage, fetchBalances, fetchBalanceAt } = deps;
+  const { storage } = deps;
 
   switch (method) {
     // ---- Public surface: callable by any web page ----
     case "eth_chainId":
-      return handleChainId(storage);
+      return handleChainId(deps);
     case "eth_accounts":
       return handleAccounts(storage, context.origin);
     case "eth_getBalance":
-      return handleGetBalance(storage, fetchBalanceAt, params);
+      return handleGetBalance(deps, params);
     case "eth_requestAccounts":
       return handleRequestAccounts(deps, context);
     case "wallet_revokePermissions":
@@ -278,7 +292,7 @@ async function handle(
     case "wallet_getState":
       return handleGetState(deps);
     case "wallet_getBalances":
-      return handleGetBalances(storage, fetchBalances, params);
+      return handleGetBalances(deps, params);
     case "wallet_setDefaultAccount":
       return handleSetDefaultAccount(storage, params);
     case "wallet_setSiteAccount":
@@ -303,8 +317,8 @@ async function handle(
 // Public methods
 // ============================================================================
 
-async function handleChainId(storage: WalletStorage): Promise<Hex> {
-  return (await storage.get("cc:chainId")) ?? DEFAULT_CHAIN_ID;
+async function handleChainId({ networks }: HandlerContext): Promise<Hex> {
+  return (await networks.read()).chainId;
 }
 
 /**
@@ -338,12 +352,11 @@ async function handleAccounts(storage: WalletStorage, origin: Origin): Promise<A
 }
 
 async function handleGetBalance(
-  storage: WalletStorage,
-  fetchBalanceAt: BalanceAtReader,
+  { fetchBalanceAt, networks }: HandlerContext,
   params: unknown[],
 ): Promise<Hex> {
   const { address, blockTag } = parseGetBalanceParams(params);
-  const network = await resolveActiveNetwork(storage);
+  const network = await resolveActiveNetwork(networks);
 
   return fetchBalanceAt(network, address, blockTag);
 }
@@ -436,7 +449,7 @@ async function handleSendTransaction(
   context: SenderContext,
   params: unknown[],
 ): Promise<Hex> {
-  const { storage, approvals, sender } = deps;
+  const { storage, approvals, sender, networks } = deps;
   const origin = context.origin;
 
   const [sites, accounts] = await Promise.all([
@@ -455,7 +468,7 @@ async function handleSendTransaction(
 
   // Throws -32602 for a malformed request, or 4100 for someone else's account.
   const transaction = parseTransactionRequest(params, list[accountIndex]);
-  const network = await resolveActiveNetwork(storage);
+  const network = await resolveActiveNetwork(networks);
 
   /**
    * 🇪🇸 NOTA: se estima ANTES de abrir la ventana y el resultado se mete en la
@@ -507,7 +520,7 @@ async function handleSignTypedData(
   context: SenderContext,
   params: unknown[],
 ): Promise<Hex> {
-  const { storage, approvals, sender } = deps;
+  const { storage, approvals, sender, networks } = deps;
   const origin = context.origin;
 
   const [sites, accounts] = await Promise.all([
@@ -526,7 +539,7 @@ async function handleSignTypedData(
 
   // Throws -32602 for a malformed payload, or 4100 for someone else's account.
   const { address, payload } = parseTypedDataParams(params, list[accountIndex]);
-  const network = await resolveActiveNetwork(storage);
+  const network = await resolveActiveNetwork(networks);
 
   /**
    * ------------------------------------------------------------------------
@@ -641,14 +654,14 @@ async function handleImportMnemonic(
 async function handleGetState({
   storage,
   activeOrigin,
+  networks,
 }: HandlerContext): Promise<WalletSnapshot> {
-  const [mnemonic, accounts, storedIndex, chainId, networks, sites] = await Promise.all([
+  const [mnemonic, accounts, storedIndex, sites, catalogue] = await Promise.all([
     storage.get("cc:mnemonic"),
     storage.get("cc:accounts"),
     storage.get("cc:defaultAccountIndex"),
-    storage.get("cc:chainId"),
-    storage.get("cc:networks"),
     storage.get("cc:connectedSites"),
+    networks.read(),
   ]);
 
   const list = accounts ?? [];
@@ -657,8 +670,8 @@ async function handleGetState({
     isLoaded: typeof mnemonic === "string" && mnemonic.length > 0,
     accounts: list,
     defaultAccountIndex: clampAccountIndex(storedIndex, list.length),
-    chainId: chainId ?? DEFAULT_CHAIN_ID,
-    networks: networks ?? defaultNetworks(),
+    chainId: catalogue.chainId,
+    networks: catalogue.networks,
     activeSite: await resolveActiveSite(activeOrigin, sites, list.length),
   };
 }
@@ -696,12 +709,11 @@ async function resolveActiveSite(
 }
 
 async function handleGetBalances(
-  storage: WalletStorage,
-  fetchBalances: BalanceReader,
+  { fetchBalances, networks }: HandlerContext,
   params: unknown[],
 ): Promise<Record<Address, Hex>> {
   const { addresses } = parseGetBalancesParams(params);
-  const network = await resolveActiveNetwork(storage);
+  const network = await resolveActiveNetwork(networks);
 
   return fetchBalances(network, addresses);
 }
@@ -844,19 +856,19 @@ async function handleReset({ storage, emit }: HandlerContext): Promise<null> {
 }
 
 /** The NetworkConfig matching cc:chainId, or 4902 if it is not in the catalogue. */
-async function resolveActiveNetwork(storage: WalletStorage): Promise<NetworkConfig> {
-  const [chainId, networks] = await Promise.all([
-    storage.get("cc:chainId"),
-    storage.get("cc:networks"),
-  ]);
+async function resolveActiveNetwork(networks: NetworkStore): Promise<NetworkConfig> {
+  const { networks: catalogue, chainId } = await networks.read();
+  const network = catalogue.find((candidate) => candidate.chainId === chainId);
 
-  const activeChainId = chainId ?? DEFAULT_CHAIN_ID;
-  const network = (networks ?? defaultNetworks()).find(
-    (candidate) => candidate.chainId === activeChainId,
-  );
-
+  /**
+   * 🇪🇸 NOTA: en la práctica no se alcanza, porque `read()` pasa por la
+   * migración y ésa garantiza que el activo existe. Se deja porque el
+   * invariante lo sostiene otro módulo: el día que alguien escriba `cc:chainId`
+   * sin pasar por el store, esto responde 4902 en vez de reventar con un
+   * `undefined.rpcUrl` a mitad de una firma.
+   */
   if (network === undefined) {
-    throw new ProviderError(ProviderErrors.unrecognizedChain(activeChainId));
+    throw new ProviderError(ProviderErrors.unrecognizedChain(chainId));
   }
   return network;
 }
