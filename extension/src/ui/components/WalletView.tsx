@@ -6,6 +6,7 @@ import { callBackground, toRpcError } from "@/ui/rpc";
 import { AccountRow } from "./AccountRow";
 import { ActiveSiteBand } from "./ActiveSiteBand";
 import { ConnectedSites } from "./ConnectedSites";
+import { NetworkSelector } from "./NetworkSelector";
 import { ResetButton } from "./ResetButton";
 
 interface WalletViewProps {
@@ -14,7 +15,11 @@ interface WalletViewProps {
 }
 
 export function WalletView({ snapshot, onChanged }: WalletViewProps) {
-  const { balances, error: balanceError, isInitialLoad } = useBalances(snapshot.accounts);
+  const {
+    balances,
+    error: balanceError,
+    isInitialLoad,
+  } = useBalances(snapshot.accounts, snapshot.chainId);
   const [actionError, setActionError] = useState<string | null>(null);
   /** Bumped so the connected-sites list re-reads after any change. */
   const [revision, setRevision] = useState(0);
@@ -109,6 +114,13 @@ export function WalletView({ snapshot, onChanged }: WalletViewProps) {
           />
         ))}
       </ul>
+
+      <NetworkSelector
+        networks={snapshot.networks}
+        chainId={snapshot.chainId}
+        unusableChainIds={snapshot.unusableChainIds}
+        onChanged={refreshAll}
+      />
 
       <ConnectedSites
         accounts={snapshot.accounts}

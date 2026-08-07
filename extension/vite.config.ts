@@ -68,6 +68,7 @@ export default defineConfig({
         index: resolve(root, "index.html"),
         connect: resolve(root, "connect.html"),
         notification: resolve(root, "notification.html"),
+        network: resolve(root, "network.html"),
         background: resolve(root, "src/background.ts"),
       },
       output: {

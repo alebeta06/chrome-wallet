@@ -1387,3 +1387,112 @@ Cambia de red desde el popup. Esperado: **las dos** imprimen.
 
 Y en las dos, comprueba que **no** llegó ningún `accountsChanged`: pon el
 listener antes de cambiar de red.
+
+## 72. El selector de red
+
+Con el popup abierto:
+
+- Las redes salen con nombre y símbolo, y la activa marcada.
+- Pulsar otra cambia de red. Los saldos se refrescan **al momento**, no cinco
+  segundos después: el chainId entra en la clave del sondeo.
+- Las dos de serie **no** tienen la ✕ de borrar.
+
+## 73. Alta manual — y por qué está en su propia ventana
+
+`+ Add network` abre una ventana aparte, no una pantalla dentro del popup.
+
+Levanta el segundo Anvil (`anvil --port 8546 --chain-id 1338`) y rellena:
+
+```
+Name      Anvil Two
+RPC       http://localhost:8546
+Chain ID  0x53a
+Symbol    ETH
+Decimals  18
+```
+
+Esperado: Chrome pide permiso, se verifica el chainId, la red aparece en el
+selector, y **no** te cambia a ella.
+
+**Comprueba el motivo de la ventana aparte**, que es lo que midió el GATE 2:
+
+1. Abre el popup y luego haz clic **fuera** de él. Se cierra.
+2. Ahora abre la ventana de red, escribe medio formulario y haz clic fuera.
+   **Sigue ahí.**
+
+Si el formulario viviera en el popup, cualquier despiste perdería lo escrito — y
+peor: el diálogo de permisos de Chrome mataría el contexto y el `await` no
+volvería nunca.
+
+**Y comprueba lo que NO aparece:** al pulsar "Add network" no se abre ninguna
+ventana de aprobación preguntándote si apruebas lo que acabas de escribir. No
+falta: sobra. El dueño de la wallet no se aprueba a sí mismo, y una aprobación
+que no puede acabar en "no" solo enseña a pulsar sin leer.
+
+## 74. Validación en el propio campo
+
+En el formulario, escribe `http://rpc.example.com` en RPC y pulsa enviar.
+
+Esperado: el error sale **junto al campo**, diciendo que solo se admite https o
+http en local — y **Chrome no llega a pedir ningún permiso**. Lo mismo con un
+Chain ID que no sea hex.
+
+## 75. Borrar una red y su permiso
+
+1. Añade Anvil Two (comprobación 73).
+2. Pulsa la ✕ de su fila.
+3. En `chrome://extensions` → Site access: `localhost:8546` **ya no está**.
+4. Y `localhost:8545` **sigue ahí**.
+
+El paso 4 es el que importa. Mismo host, puerto distinto, **permisos
+independientes** — lo midió el spike de la Fase 8. Con la condición escrita por
+host, borrar Anvil Two habría dejado a Anvil de serie sin permiso.
+
+Prueba también los tres rechazos, y lee los mensajes como si no supieras nada:
+
+- ✕ en una red de serie → *"comes with CodeCrypto Wallet and cannot be removed"*.
+- ✕ en la red **activa** → dice que **cambies de red primero**. Es el único de los
+  tres que el usuario puede arreglar, y el único que dice cómo.
+
+## 76. Una red sin acceso: marcada, y con salida
+
+1. Con Anvil Two añadida y **Anvil de serie** como red activa, revoca
+   `localhost:8546` desde `chrome://extensions`.
+2. Abre el popup.
+
+Esperado:
+
+- Anvil Two **sigue en la lista**, atenuada y tachada, con el chip `no access`.
+  No desaparece: si desapareciera, irías a añadirla otra vez, que es la acción
+  equivocada porque ya la tienes.
+- Al lado, un botón **Restore**.
+- Si intentas seleccionarla, sale el 4902 con el mensaje del permiso revocado.
+
+Pulsa **Restore**: se abre la ventana de red con los datos ya rellenos y en modo
+*"Restore access"*, con los campos bloqueados —se reconcede lo que la wallet
+tiene guardado, no lo que escribas— y un aviso explicando qué pasó. Concede el
+permiso y la red vuelve a ser usable, sin haber tenido que escribir nada.
+
+## 77. La red activa se queda sin acceso
+
+Repite la 76 pero con **Anvil Two como red activa**.
+
+Esperado: la wallet cae a Anvil sola y la dApp recibe `chainChanged`
+(comprobación 58), y el popup enseña arriba el aviso de que ya no puede alcanzar
+esa red — separado del banner de saldos, porque "no llego al nodo" y "me quitaste
+el permiso" tienen arreglos distintos.
+
+## 78. Una dApp cambia la red con el popup abierto
+
+Deja el popup abierto y, desde la consola de la dApp:
+
+```js
+await provider.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0xaa36a7' }],
+})
+```
+
+Esperado: el selector del popup **se mueve solo** a Sepolia, sin cerrarlo ni
+volver a abrirlo. No hay sondeo: el popup escucha `chrome.storage.onChanged`,
+que es donde el cambio deja huella pase por donde pase.

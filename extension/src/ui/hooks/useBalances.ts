@@ -23,7 +23,15 @@ export interface BalancesState {
   isInitialLoad: boolean;
 }
 
-export function useBalances(addresses: Address[]): BalancesState {
+/**
+ * @param chainId only to key the effect. See the note below.
+ *
+ * 🇪🇸 NOTA: opcional porque `connect.html` no lo tiene. Esa ventana enseña
+ * saldos para ayudar a elegir cuenta, vive como mucho 60 s y no muestra ninguna
+ * red, así que no hay nada en pantalla que un cambio de red dejara mintiendo. El
+ * popup sí lo pasa, y ahí es donde importa.
+ */
+export function useBalances(addresses: Address[], chainId?: Hex): BalancesState {
   const [balances, setBalances] = useState<Record<Address, Hex>>({});
   const [error, setError] = useState<RpcError | null>(null);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
@@ -33,7 +41,14 @@ export function useBalances(addresses: Address[]): BalancesState {
    * un array nuevo en cada render, así que depender de él reiniciaría el
    * setInterval en cada render y el polling no llegaría a dispararse nunca.
    */
-  const key = addresses.join(",");
+  /**
+   * 🇪🇸 NOTA: el chainId entra en la clave desde la Fase 8. Sin él, cambiar de
+   * red no reinicia el sondeo: el intervalo sigue corriendo y los saldos de la
+   * red anterior se quedan en pantalla hasta el siguiente tick — cinco segundos
+   * enseñando el saldo de otra cadena junto al nombre de la nueva. Y si la red
+   * nueva no responde, el error tampoco aparece hasta entonces.
+   */
+  const key = `${chainId ?? ""}:${addresses.join(",")}`;
 
   useEffect(() => {
     if (addresses.length === 0) {
