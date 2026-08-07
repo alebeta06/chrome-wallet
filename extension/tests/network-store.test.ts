@@ -231,6 +231,73 @@ describe("createNetworkStore", () => {
     });
   });
 
+  describe("fallbackIfUnusable", () => {
+    const always = async () => true;
+    const never = async () => false;
+
+    /**
+     * 🇪🇸 NOTA: el usuario quita el permiso desde `chrome://extensions` sin pasar
+     * por la wallet. Si era el de la red activa, quedarse ahí deja una wallet
+     * que no funciona y no dice por qué: las cuentas están, la red está en el
+     * selector, y los saldos no llegan.
+     */
+    it("moves to the default network and announces it", async () => {
+      const area = countingArea();
+      const { store, emitted } = storeWithEmitter(area);
+      await store.upsert(POLYGON);
+      await store.setActive(POLYGON.chainId);
+
+      await expect(store.fallbackIfUnusable(never)).resolves.toBe(DEFAULT_CHAIN_ID);
+
+      expect((await store.read()).chainId).toBe(DEFAULT_CHAIN_ID);
+      expect(emitted).toEqual([
+        { name: "chainChanged", data: DEFAULT_CHAIN_ID, changedOrigin: null },
+      ]);
+    });
+
+    it("does nothing while the active network is still usable", async () => {
+      const area = countingArea();
+      const { store, emitted } = storeWithEmitter(area);
+      await store.upsert(POLYGON);
+      await store.setActive(POLYGON.chainId);
+      const writesBefore = area.writes;
+
+      await expect(store.fallbackIfUnusable(always)).resolves.toBeNull();
+
+      expect((await store.read()).chainId).toBe(POLYGON.chainId);
+      expect(emitted).toEqual([]);
+      expect(area.writes).toBe(writesBefore);
+    });
+
+    /**
+     * 🇪🇸 NOTA: sin esta guarda, revocar cualquier permiso con Anvil activo
+     * emitiría un `chainChanged` de Anvil a Anvil. Una dApp que reacciona
+     * recargando lo haría por un cambio que no ha ocurrido.
+     */
+    it("says nothing when the default network is already the active one", async () => {
+      const { store, emitted } = storeWithEmitter(countingArea());
+      await store.migrate();
+
+      await expect(store.fallbackIfUnusable(never)).resolves.toBeNull();
+      expect(emitted).toEqual([]);
+    });
+
+    it("only asks about the active network", async () => {
+      const store = storeOn(countingArea());
+      await store.upsert(POLYGON);
+      await store.upsert(BASE);
+      await store.setActive(POLYGON.chainId);
+
+      const asked: string[] = [];
+      await store.fallbackIfUnusable(async (entry) => {
+        asked.push(entry.chainId);
+        return true;
+      });
+
+      expect(asked).toEqual([POLYGON.chainId]);
+    });
+  });
+
   /**
    * ---------------------------------------------------------------------------
    * THE RACE. NO AWAIT BETWEEN THE CALLS

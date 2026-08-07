@@ -49,6 +49,7 @@ import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
 import { createNetworkStore, type NetworkStore } from "./network-store";
 import { DEFAULT_CHAIN_ID } from "./networks";
+import { hasPermissionFor, type PermissionsPort } from "./permissions";
 import {
   connectSite,
   disconnectSite,
@@ -91,6 +92,8 @@ export interface DispatcherDeps {
    * tests, donde el despachador es el único que escribe.
    */
   networks?: NetworkStore;
+  /** Phase 8. Injected so the snapshot can be built without chrome.permissions. */
+  permissions?: PermissionsPort;
 }
 
 /** Everything the handlers are allowed to reach. Nothing is a module global. */
@@ -103,6 +106,7 @@ interface HandlerContext {
   sender: TransactionSender;
   activeOrigin: () => Promise<Origin | null>;
   networks: NetworkStore;
+  permissions: PermissionsPort;
 }
 
 /**
@@ -126,6 +130,19 @@ const NO_APPROVALS: ApprovalCoordinator = {
 };
 
 const NO_EMIT: EventEmitter = () => Promise.resolve();
+
+/**
+ * 🇪🇸 NOTA: el inerte dice que SÍ, y esa dirección está elegida. Si se
+ * equivoca por optimista, la red aparece usable y falla con un 4901 que la UI
+ * ya sabe explicar — "no se puede alcanzar el nodo". Si se equivocara por
+ * pesimista, escondería redes que funcionan perfectamente y no habría nada en
+ * pantalla que dijera por qué. El primer fallo se ve y se entiende; el segundo
+ * parece que la wallet perdió la red.
+ */
+const ALL_GRANTED: PermissionsPort = {
+  contains: () => Promise.resolve(true),
+  remove: () => Promise.resolve(false),
+};
 
 const NO_SENDER: TransactionSender = {
   send: () =>
@@ -160,6 +177,7 @@ export function createDispatcher({
   sender = NO_SENDER,
   activeOrigin = () => Promise.resolve(null),
   networks = createNetworkStore(storage),
+  permissions = ALL_GRANTED,
 }: DispatcherDeps): Dispatcher {
   const deps: HandlerContext = {
     storage,
@@ -170,6 +188,7 @@ export function createDispatcher({
     sender,
     activeOrigin,
     networks,
+    permissions,
   };
 
   return async function dispatch(message, sender, runtimeId) {
@@ -655,6 +674,7 @@ async function handleGetState({
   storage,
   activeOrigin,
   networks,
+  permissions,
 }: HandlerContext): Promise<WalletSnapshot> {
   const [mnemonic, accounts, storedIndex, sites, catalogue] = await Promise.all([
     storage.get("cc:mnemonic"),
@@ -672,8 +692,45 @@ async function handleGetState({
     defaultAccountIndex: clampAccountIndex(storedIndex, list.length),
     chainId: catalogue.chainId,
     networks: catalogue.networks,
+    unusableChainIds: await unusableChains(permissions, catalogue.networks),
     activeSite: await resolveActiveSite(activeOrigin, sites, list.length),
   };
+}
+
+/**
+ * Which catalogue entries the wallet may not actually reach.
+ *
+ * ---------------------------------------------------------------------------
+ * DERIVED ON EVERY READ, NEVER STORED
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: un flag persistido se queda obsoleto en cuanto el usuario vuelve a
+ * conceder el permiso desde `chrome://extensions`, y ahí no hay ningún evento
+ * que nos avise justo cuando el popup se abre. Preguntar siempre no puede
+ * mentir.
+ *
+ * El coste es N `contains()` en paralelo, uno por red del catálogo. Y esto NO
+ * está en el bucle caliente: el sondeo de saldos cada 5 s llama a
+ * `wallet_getBalances`, no a `wallet_getState`, que solo se pide al abrir el
+ * popup y después de una acción. Hay una comprobación manual que lo cronometra
+ * en Chrome en vez de darlo por bueno aquí.
+ *
+ * Las builtin se comprueban igual que las demás. Están en `host_permissions`,
+ * así que deberían salir siempre concedidas — pero si el usuario restringe el
+ * acceso a sitios de la extensión dejan de estarlo, y eso es justo lo que hay
+ * que poder enseñar. Saltárselas por "seguro que están" escondería el caso.
+ */
+async function unusableChains(
+  permissions: PermissionsPort,
+  catalogue: NetworkConfig[],
+): Promise<Hex[]> {
+  const answers = await Promise.all(
+    catalogue.map(async (entry) => ({
+      chainId: entry.chainId,
+      usable: await hasPermissionFor(permissions, entry.rpcUrl),
+    })),
+  );
+
+  return answers.filter((entry) => !entry.usable).map((entry) => entry.chainId);
 }
 
 /**

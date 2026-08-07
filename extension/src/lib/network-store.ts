@@ -59,6 +59,11 @@ export interface NetworkStore {
   upsert(entry: NetworkConfig): Promise<NetworkConfig[]>;
   /** Removes a user network, or explains why it would not. */
   remove(chainId: Hex): Promise<RemovalResult>;
+  /**
+   * Moves off the active network if it is no longer usable. Resolves with the
+   * new chain id, or null when nothing moved.
+   */
+  fallbackIfUnusable(isUsable: (network: NetworkConfig) => Promise<boolean>): Promise<Hex | null>;
 }
 
 /** Inert by default: a test that only reads a catalogue should not need tabs. */
@@ -214,6 +219,41 @@ export function createNetworkStore(
 
         if (result.ok) await persist({ networks: result.networks, chainId: current.chainId });
         return result;
+      });
+    },
+
+    /**
+     * ------------------------------------------------------------------------
+     * A REVOKED PERMISSION LEAVES THE WALLET POINTING AT A DEAD NETWORK
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: el usuario puede quitar un permiso de host desde
+     * `chrome://extensions` en cualquier momento, sin pasar por la wallet. Si
+     * era el de la red activa, todo lo que consulte la red empieza a fallar y
+     * el popup no tendría forma de explicar por qué: las cuentas están, la red
+     * está en el selector, y los saldos no llegan.
+     *
+     * Moverse a la red por defecto es reversible en un clic y visible en el
+     * selector. Quedarse quieto no es ninguna de las dos cosas.
+     *
+     * El predicado se inyecta en vez de importar `permissions.ts` para que este
+     * módulo siga sin saber nada de `chrome.*` y el caso se pueda probar sin
+     * navegador.
+     */
+    fallbackIfUnusable(
+      isUsable: (network: NetworkConfig) => Promise<boolean>,
+    ): Promise<Hex | null> {
+      return serialize(async () => {
+        const current = await read();
+        const active = findNetwork(current.networks, current.chainId);
+
+        // Already the default, or gone entirely — migrate() owns that case.
+        if (active === undefined || active.chainId === DEFAULT_CHAIN_ID) return null;
+        if (await isUsable(active)) return null;
+
+        await persist({ networks: current.networks, chainId: DEFAULT_CHAIN_ID });
+        await announceChain(DEFAULT_CHAIN_ID);
+
+        return DEFAULT_CHAIN_ID;
       });
     },
   };

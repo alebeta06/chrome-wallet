@@ -1026,3 +1026,86 @@ mismatch"* por los `<link rel="modulepreload">` que Vite generaba. Bajo
 `chrome-extension://` no adelantaban nada —los archivos son locales— y llenaban
 el panel de ruido. Un panel de errores con ruido permanente es un panel que se
 deja de mirar.
+
+---
+
+# Fase 8 — Redes
+
+Recarga la extensión antes de empezar: el manifest cambió (`optional_host_permissions`).
+
+## 56. Cuánto cuesta de verdad `contains()`
+
+`unusableChainIds` se calcula preguntando a Chrome una vez por red, en cada
+`wallet_getState`. Antes de dar por bueno que da igual, se mide.
+
+En la consola de una página de la extensión:
+
+```js
+const pattern = 'http://localhost:8545/*'
+const t0 = performance.now()
+for (let i = 0; i < 100; i++) await chrome.permissions.contains({ origins: [pattern] })
+console.log('media por contains():', (performance.now() - t0) / 100, 'ms')
+```
+
+Anótalo. Con dos o tres redes en el catálogo y las llamadas en paralelo, el
+coste real de un `wallet_getState` es aproximadamente **una** de esas medias, no
+la suma.
+
+Y comprueba que el sondeo de saldos NO lo paga: con el popup abierto,
+
+```js
+(await chrome.storage.local.get('cc:logs'))['cc:logs']
+  .filter((e) => e.label === 'wallet_getState').length
+```
+
+no crece cada 5 s. El sondeo llama a `wallet_getBalances`; `wallet_getState`
+solo se pide al abrir el popup y después de una acción.
+
+> Si la media saliera por encima de ~1 ms, hay que cachear el resultado durante
+> lo que dura el popup abierto e invalidarlo con `permissions.onAdded` /
+> `onRemoved`. Por debajo, no.
+
+## 57. Las builtin salen usables en un perfil normal
+
+```js
+await chrome.runtime.sendMessage({
+  type: 'CODECRYPTO_RPC', id: crypto.randomUUID(),
+  method: 'wallet_getState', params: [],
+}).then((r) => r.result.unusableChainIds)
+```
+
+Esperado: **`[]`**. Anvil y Sepolia están en `host_permissions`, así que deberían
+estar siempre concedidas.
+
+> Esta comprobación existe porque esa suposición podría ser falsa. Chrome deja
+> restringir el acceso a sitios de una extensión desde su tarjeta ("On click" /
+> "On specific sites"), y si eso también retira los `host_permissions`
+> declarados, las dos builtin aparecerían como no usables sin que el usuario
+> haya tocado ningún permiso de red. Si el array no sale vacío, **para**: la
+> lógica de `unusableChainIds` necesita distinguir retirada de revocada.
+
+## 58. Revocar el host de la red activa
+
+1. Añade Sepolia como red activa: `wallet_setActiveNetwork` con `0xaa36a7`, o el
+   selector cuando exista.
+2. Abre la dApp y conéctala. Deja la pestaña abierta con la consola visible.
+3. En `chrome://extensions` → CodeCrypto Wallet → **Details** → Site access,
+   quita `sepolia.drpc.org`.
+
+Esperado, las tres cosas:
+
+- El service worker registra `a revoked host permission moved the wallet to 0x7a69`.
+- `wallet_getState` devuelve `chainId: "0x7a69"`.
+- **La dApp recibe `chainChanged` con `"0x7a69"`** sin recargar nada.
+
+El tercero es el que importa. Sin él, la dApp se queda creyendo que está en
+Sepolia mientras la wallet firmaría en Anvil — la misma desincronización que la
+comprobación de deriva de chainId cierra desde el otro lado.
+
+## 59. Revocar un host que no es el de la red activa
+
+Con Anvil activo, revoca el host de Sepolia.
+
+Esperado: `unusableChainIds` incluye `0xaa36a7`, la red **sigue** en `networks`,
+y **no** se emite `chainChanged`. Una red no usable no es una red borrada, y
+revocar algo que no estabas usando no te mueve de sitio.

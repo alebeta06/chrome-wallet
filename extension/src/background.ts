@@ -22,6 +22,7 @@ import { pendingBadgeText } from "@/lib/badge";
 import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
 import { createNetworkStore } from "@/lib/network-store";
+import { createPermissionsPort, hasPermissionFor } from "@/lib/permissions";
 import { createTransactionSender } from "@/lib/signer";
 import { createWalletStorage, type WalletStorage } from "@/lib/storage";
 
@@ -143,8 +144,17 @@ const sender = createTransactionSender();
  * también se construye una sola vez.
  */
 const networks = createNetworkStore(storage, emit);
+const permissions = createPermissionsPort();
 
-const dispatch = createDispatcher({ storage, approvals, emit, sender, activeOrigin, networks });
+const dispatch = createDispatcher({
+  storage,
+  approvals,
+  emit,
+  sender,
+  activeOrigin,
+  networks,
+  permissions,
+});
 
 console.log(`[${PROTOCOL}] background service worker alive`);
 
@@ -166,6 +176,41 @@ console.log(`[${PROTOCOL}] background service worker alive`);
  */
 void networks.migrate().catch((cause: unknown) => {
   console.error(`[${PROTOCOL}] could not migrate the network catalogue:`, cause);
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE USER CAN REVOKE A HOST WITHOUT EVER OPENING THE WALLET
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: `chrome://extensions` deja quitar un permiso de host cuando quiera,
+ * y la wallet no participa en esa decisión — solo se entera por este evento. Si
+ * el revocado era el de la red activa, todo lo que consulte la red empieza a
+ * fallar y el popup no tendría cómo explicarlo: las cuentas siguen ahí, la red
+ * sigue en el selector, y los saldos simplemente no llegan.
+ *
+ * Que las redes afectadas se vean como no usables no necesita nada aquí: se
+ * deriva al construir el snapshot. Lo que sí necesita una acción es la red
+ * ACTIVA, porque dejarla puesta convierte la wallet en algo que no funciona sin
+ * decir por qué.
+ *
+ * No se filtra por qué origen se revocó. `fallbackIfUnusable` vuelve a
+ * preguntar por el permiso de la red activa, que es la única fuente que el
+ * spike demostró fiable — el `permissions` que llega en el evento describe lo
+ * que se quitó, no lo que queda.
+ */
+chrome.permissions.onRemoved.addListener((removed) => {
+  if (removed.origins === undefined || removed.origins.length === 0) return;
+
+  void networks
+    .fallbackIfUnusable((network) => hasPermissionFor(permissions, network.rpcUrl))
+    .then((movedTo) => {
+      if (movedTo !== null) {
+        console.warn(`[${PROTOCOL}] a revoked host permission moved the wallet to ${movedTo}`);
+      }
+    })
+    .catch((cause: unknown) => {
+      console.error(`[${PROTOCOL}] could not react to a revoked permission:`, cause);
+    });
 });
 
 // ============================================================================

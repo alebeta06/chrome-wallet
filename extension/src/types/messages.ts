@@ -194,6 +194,15 @@ export interface WalletSnapshot {
   defaultAccountIndex: number;
   chainId: Hex;
   networks: NetworkConfig[];
+  /**
+   * Networks whose RPC host permission is not currently granted.
+   *
+   * 🇪🇸 NOTA: se calcula en vivo con `chrome.permissions.contains()`, nunca se
+   * persiste. Un flag guardado se queda obsoleto en cuanto el usuario vuelve a
+   * conceder el permiso desde `chrome://extensions`, y entonces la wallet
+   * enseñaría como rota una red que funciona.
+   */
+  unusableChainIds: Hex[];
   /** null when the focused tab is not a connected dApp (or is an extension page). */
   activeSite: ConnectedSite | null;
 }

@@ -26,6 +26,7 @@ import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createWalletStorage, type StorageArea } from "@/lib/storage";
 import type { NetworkStore } from "@/lib/network-store";
+import type { PermissionsPort } from "@/lib/permissions";
 import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID, defaultNetworks } from "@/lib/networks";
 import { ProviderError } from "@/lib/errors";
 import type { BalanceAtReader, BalanceReader } from "@/lib/chain";
@@ -167,6 +168,7 @@ function brokenNetworkStore(): NetworkStore {
     setActive: async () => false,
     upsert: async () => defaultNetworks(),
     remove: async () => ({ ok: false, reason: "not-found" }),
+    fallbackIfUnusable: async () => null,
   };
 }
 
@@ -1734,6 +1736,104 @@ describe("wallet_reset with connected sites", () => {
     await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
 
     expect(emitted).toEqual([]);
+  });
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * WHICH NETWORKS THE WALLET CAN ACTUALLY REACH
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: `unusableChainIds` se deriva en cada lectura y no se guarda nunca.
+ * Un flag persistido se queda obsoleto en cuanto el usuario vuelve a conceder
+ * el permiso desde `chrome://extensions`, y no hay ningún evento que nos avise
+ * justo cuando el popup se abre.
+ */
+describe("WalletSnapshot.unusableChainIds", () => {
+  /** A port that grants everything except the patterns it is told to deny. */
+  function denying(...denied: string[]): PermissionsPort {
+    const blocked = new Set(denied);
+    return {
+      contains: (pattern) => Promise.resolve(!blocked.has(pattern)),
+      remove: () => Promise.resolve(true),
+    };
+  }
+
+  async function snapshotWith(
+    permissions: PermissionsPort,
+    seed: Record<string, unknown> = LOADED_WALLET,
+  ) {
+    const { dispatch } = setup(seed, undefined, undefined, { permissions });
+    return expectResult<WalletSnapshot>(
+      await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID),
+    );
+  }
+
+  it("is empty when every host is granted", async () => {
+    expect((await snapshotWith(denying())).unusableChainIds).toEqual([]);
+  });
+
+  it("lists the network whose host was revoked", async () => {
+    const snapshot = await snapshotWith(denying("https://sepolia.drpc.org/*"));
+
+    expect(snapshot.unusableChainIds).toEqual([SEPOLIA_CHAIN_ID]);
+    // The network stays in the catalogue: it is unusable, not gone.
+    expect(snapshot.networks.map((entry) => entry.chainId)).toContain(SEPOLIA_CHAIN_ID);
+  });
+
+  /**
+   * 🇪🇸 NOTA: las builtin se comprueban igual que las demás. Están en
+   * `host_permissions`, así que normalmente salen concedidas — pero si el
+   * usuario restringe el acceso a sitios de la extensión dejan de estarlo, y
+   * eso es exactamente lo que hay que poder enseñar. Saltárselas por "seguro
+   * que están" escondería el caso.
+   */
+  it("does not exempt the built-ins", async () => {
+    const snapshot = await snapshotWith(
+      denying("http://localhost:8545/*", "https://sepolia.drpc.org/*"),
+    );
+
+    expect(snapshot.unusableChainIds).toEqual([ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID]);
+  });
+
+  /**
+   * 🇪🇸 NOTA: la revocación es POR PATRÓN COMPLETO, puerto incluido — medido en
+   * Chrome durante el spike de la Fase 8. Quitar el permiso de `localhost:8545`
+   * no toca el de `localhost:8546`, así que una red no puede arrastrar a otra
+   * del mismo host.
+   */
+  it("does not drag another network on the same host", async () => {
+    const other = {
+      chainId: "0x1a4",
+      name: "Second Anvil",
+      rpcUrl: "http://localhost:8546",
+      symbol: "ETH",
+      explorerUrl: null,
+      builtIn: false,
+    };
+    const snapshot = await snapshotWith(denying("http://localhost:8545/*"), {
+      ...LOADED_WALLET,
+      "cc:networks": [other],
+    });
+
+    expect(snapshot.unusableChainIds).toEqual([ANVIL_CHAIN_ID]);
+  });
+
+  /** A stored network whose url the policy would now refuse can never be reached. */
+  it("marks a network the rpc policy refuses", async () => {
+    const insecure = {
+      chainId: "0x1a4",
+      name: "Insecure",
+      rpcUrl: "http://rpc.example.com",
+      symbol: "ETH",
+      explorerUrl: null,
+      builtIn: false,
+    };
+    const snapshot = await snapshotWith(denying(), {
+      ...LOADED_WALLET,
+      "cc:networks": [insecure],
+    });
+
+    expect(snapshot.unusableChainIds).toEqual(["0x1a4"]);
   });
 });
 
