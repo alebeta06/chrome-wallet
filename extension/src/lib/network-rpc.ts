@@ -69,13 +69,27 @@ function parseChainIdParam(params: unknown[], method: string): Hex {
  * El mensaje lleva el NOMBRE de la red, nunca la rpcUrl: una URL con API key
  * dentro no tiene por qué acabar en un objeto de error que cruza hasta una
  * dApp. Mismo criterio que `chain.ts` y `signer.ts`.
+ *
+ * ---------------------------------------------------------------------------
+ * THE MESSAGE HAS TO SAY WHAT TO DO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: "esa red no está disponible" no es un mensaje, es un callejón. La
+ * red SÍ está en el catálogo; lo que falta es el permiso, y el usuario no tiene
+ * forma de adivinar eso ni de saber que se arregla volviendo a conceder.
+ *
+ * Se le dice explícitamente que hace falta reconceder el permiso, y a la dApp se
+ * le nombra `wallet_addEthereumChain` como la vía — que es lo mismo que ofrece
+ * el otro 4902, y por eso los dos comparten código. Para que esa vía funcione de
+ * verdad, el alta NO puede cortocircuitar por idempotencia cuando el permiso
+ * falta: ver `addChain`.
  */
 function unreachableChain(network: NetworkConfig): ProviderError {
   return new ProviderError({
     code: ErrorCode.UNRECOGNIZED_CHAIN,
     message:
-      `CodeCrypto Wallet cannot reach "${network.name}": permission to use its RPC host ` +
-      `was revoked. Add the network again to restore it.`,
+      `CodeCrypto Wallet has "${network.name}" but is no longer allowed to reach its RPC ` +
+      `endpoint: that permission was revoked. Grant it again — call ` +
+      `wallet_addEthereumChain for this chain, or re-add it from the wallet — to use this network.`,
   });
 }
 

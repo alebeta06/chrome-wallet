@@ -158,6 +158,54 @@ Lo que hay que afirmar son los **efectos**, uno por llamada concurrente —"la r
 activa es POLYGON **y** BASE está en el catálogo"—, no un invariante que ambas
 ramas satisfacen.
 
+## Eventos: la emisión va en el punto común (aprendido en la Fase 8)
+
+Cuando **N caminos producen el mismo efecto observable**, el aviso vive en el
+punto por el que pasan todos, no repetido en cada uno.
+
+Tres cosas mueven la red activa: el selector del popup, un
+`wallet_switchEthereumChain` de una dApp, y el clampeo de la migración al
+arrancar. Las tres acaban en `setActive()` del store, así que el `chainChanged`
+está **ahí dentro** y no en los tres sitios.
+
+El motivo no es evitar repetir tres líneas: es que el cuarto camino —el que
+alguien añada dentro de seis meses— se va a olvidar. Y **el síntoma de
+olvidarlo no es un error**: es una dApp que sigue creyendo que está en la red
+anterior, firmando contra la que cree, hasta que alguien recarga la página. No
+hay excepción, ni log, ni nada que lo delate.
+
+Corolario: el punto común decide también **cuándo NO emitir**. Cambiar a la red
+que ya estaba activa devuelve éxito y no emite — la llamada salió bien, pero no
+ha cambiado nada que contar. Un evento que miente cuesta más que uno que falta.
+
+## Ediciones automatizadas: verificar que casaron
+
+Un `sed`/`python` de reemplazo que no comprueba que encontró su ancla **no es
+una edición, es una esperanza.**
+
+Pasó en la Fase 8. Un script añadía dos `case` al switch de `dispatch.ts`, el
+ancla no casó por un espacio, y el script terminó con éxito sin tocar nada:
+
+```python
+s = s.replace(viejo, nuevo)   # si `viejo` no está, esto no falla. No hace nada.
+```
+
+**El typecheck no lo caza**, y eso es lo que lo hace peligroso: el método
+simplemente cae por el `default` del switch, que es una rama que existe y
+compila. La wallet respondía 4200 a un método que estaba implementado. Lo
+encontró un test, y podría no haberlo habido.
+
+Regla: todo reemplazo automatizado lleva su `assert` antes.
+
+```python
+assert viejo in s, "ancla del switch"
+s = s.replace(viejo, nuevo, 1)
+```
+
+Es la misma familia que las otras dos lecciones de este archivo: el `await`
+intermedio, el test de concurrencia que no se pone rojo, y esto. **Las tres son
+comprobaciones que parecen hechas y no lo están.**
+
 ## Git
 
 - Conventional Commits en inglés, atómicos por unidad lógica

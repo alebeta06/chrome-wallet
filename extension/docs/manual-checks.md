@@ -1177,6 +1177,13 @@ Esperado: **4902 también**, pero el mensaje dice *"Sepolia"* y *"revoked"*. Mis
 código porque la reacción correcta de la dApp es la misma —ofrecer añadirla—, y
 distinto mensaje porque lo que el usuario tiene que entender no lo es.
 
+**Y el mensaje tiene que decir QUÉ hacer, no solo qué pasa.** Léelo como si no
+supieras nada del código: ¿te queda claro que hay que **volver a conceder el
+permiso**? Si suena a "esa red no está disponible" a secas, está mal — manda al
+usuario a añadir otra vez una red que ya tiene, que es justo lo que no hay que
+hacer. Con la red ya en el catálogo, añadirla de nuevo es la acción equivocada
+y la única que el mensaje parecería estar sugiriendo.
+
 Comprueba además que **la red activa no se movió** y que no llegó ningún
 `chainChanged`: el permiso se comprueba antes de escribir.
 
