@@ -30,6 +30,7 @@
 
 import type { Hex, NetworkConfig } from "@/types/messages";
 
+import type { EventEmitter } from "./events";
 import {
   DEFAULT_CHAIN_ID,
   findNetwork,
@@ -60,8 +61,37 @@ export interface NetworkStore {
   remove(chainId: Hex): Promise<RemovalResult>;
 }
 
-export function createNetworkStore(storage: WalletStorage): NetworkStore {
+/** Inert by default: a test that only reads a catalogue should not need tabs. */
+const NO_EMIT: EventEmitter = () => Promise.resolve();
+
+export function createNetworkStore(
+  storage: WalletStorage,
+  emit: EventEmitter = NO_EMIT,
+): NetworkStore {
   let writes: Promise<unknown> = Promise.resolve();
+
+  /**
+   * ------------------------------------------------------------------------
+   * A CHAIN THAT CHANGES WITHOUT SAYING SO IS A DESYNCHRONISED dApp
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: `chainChanged` es global —lo dice `EVENT_SCOPE` del contrato— así
+   * que va a todos los orígenes conectados y `changedOrigin` es null.
+   *
+   * Se emite después de persistir, nunca antes: una dApp que reaccione al
+   * evento preguntando `eth_chainId` tiene que encontrarse el valor nuevo, no
+   * el que estaba a medio escribir.
+   */
+  async function announceChain(chainId: Hex): Promise<void> {
+    const connectedSites = (await storage.get("cc:connectedSites")) ?? {};
+
+    try {
+      await emit("chainChanged", chainId, { changedOrigin: null, connectedSites });
+    } catch (cause) {
+      // A dApp that missed the event is worse than one that missed it silently,
+      // but neither is a reason to fail the write that already landed.
+      console.error("[codecrypto] could not announce the chain change:", cause);
+    }
+  }
 
   /** Both branches run the task: a previous failure must not stall the chain. */
   function serialize<T>(task: () => Promise<T>): Promise<T> {
@@ -114,7 +144,32 @@ export function createNetworkStore(storage: WalletStorage): NetworkStore {
           storedChainId === next.chainId &&
           JSON.stringify(stored) === JSON.stringify(next.networks);
 
-        if (!unchanged) await persist(next);
+        if (unchanged) return next;
+
+        await persist(next);
+
+        /**
+         * ------------------------------------------------------------------
+         * THE CLAMP IS A CHAIN CHANGE, AND IT HAS TO BE ANNOUNCED
+         * ------------------------------------------------------------------
+         * 🇪🇸 NOTA: si el activo guardado ya no existe, la migración lo mueve a
+         * Anvil. Una dApp abierta tiene el chainId viejo cacheado desde su
+         * `eth_chainId` inicial y nadie la corrige nunca: firmaría creyendo
+         * estar en una red y estaría en otra. Es la misma desincronización que
+         * cierra la comprobación de deriva en las aprobaciones pendientes,
+         * vista desde el otro lado.
+         *
+         * La condición es que el valor GUARDADO cambie, no que la migración
+         * escriba. Añadir una red también escribe y no mueve al usuario de red;
+         * emitir ahí sería un `chainChanged` mentiroso. Y sin la guarda de
+         * `undefined`, una instalación nueva emitiría un cambio de red que no
+         * ha ocurrido — a nadie, porque no hay sitios conectados, pero sería
+         * igual de falso.
+         */
+        if (storedChainId !== undefined && storedChainId !== next.chainId) {
+          await announceChain(next.chainId);
+        }
+
         return next;
       });
     },

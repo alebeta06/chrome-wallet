@@ -69,6 +69,34 @@ export function isBuiltIn(chainId: Hex): boolean {
 const HEX_CHAIN_ID = /^0[xX][0-9a-fA-F]+$/;
 
 /**
+ * ---------------------------------------------------------------------------
+ * THE CEILING IS A DECISION, NOT A SIDE EFFECT
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: EIP-155 no acota el chainId —en RLP es un entero sin tope— y EIP-3085
+ * tampoco fija un máximo: solo pide que sea hexadecimal con `0x` y que "parse to
+ * an integer number". Así que este techo lo ponemos nosotros y hay que decir qué
+ * cuesta.
+ *
+ * **Qué se pierde:** una cadena con chainId por encima de 2^53-1 no se puede
+ * añadir a esta wallet. Existen, sobre todo entre L3 y devnets que se generan el
+ * id a partir de un hash.
+ *
+ * **Por qué se acepta perderlo.** El chainId sale de aquí como cadena hex, pero
+ * no controlamos qué hace la dApp con él, y `parseInt`/`Number` sobre el
+ * resultado de `eth_chainId` es lo que hace medio ecosistema. Por encima de
+ * 2^53-1 esa conversión pierde precisión EN SILENCIO: la dApp cree estar en una
+ * cadena y está en otra, y una firma hecha con esa suposición es válida donde no
+ * debería. Rechazar el alta es visible y ocurre una vez; el redondeo silencioso
+ * no se ve nunca.
+ *
+ * Internamente la wallet ya usa BigInt en todas partes (`signer.ts`,
+ * `chain.ts`), así que subir el techo a 2^64-2 sería un cambio de una línea aquí
+ * el día que haga falta de verdad. Lo que no se puede subir es lo que hará la
+ * dApp del otro lado.
+ */
+const MAX_CHAIN_ID = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
  * The one spelling of a chain id this wallet stores and compares.
  *
  * ---------------------------------------------------------------------------
@@ -81,15 +109,13 @@ const HEX_CHAIN_ID = /^0[xX][0-9a-fA-F]+$/;
  * podría dar de alta `0x01` teniendo ya `0x1` y acabarías con dos entradas para
  * la misma cadena, cada una con su RPC.
  *
- * Se rechaza el 0 y cualquier cosa por encima de MAX_SAFE_INTEGER: el primero
- * no es una red, y el segundo no sobrevive al `Number()` que hace cualquier
- * consumidor JSON-RPC por el camino.
+ * El 0 se rechaza porque no es una red. Del techo se habla en MAX_CHAIN_ID.
  */
 export function canonicalChainId(value: unknown): Hex | null {
   if (typeof value !== "string" || !HEX_CHAIN_ID.test(value)) return null;
 
   const parsed = BigInt(value);
-  if (parsed <= 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  if (parsed <= 0n || parsed > MAX_CHAIN_ID) return null;
 
   return `0x${parsed.toString(16)}`;
 }

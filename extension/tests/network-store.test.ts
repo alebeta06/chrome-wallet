@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { NetworkConfig } from "@/types/messages";
+import type { NetworkConfig, Origin } from "@/types/messages";
+import type { EventEmitter } from "@/lib/events";
 import { createNetworkStore, type NetworkStore } from "@/lib/network-store";
 import {
   ANVIL_CHAIN_ID,
@@ -47,6 +48,22 @@ function storeOn(area: StorageArea): NetworkStore {
   return createNetworkStore(createWalletStorage(area));
 }
 
+/** Records every provider event the store emits, in order. */
+function recordingEmitter() {
+  const emitted: { name: string; data: unknown; changedOrigin: Origin | null }[] = [];
+
+  const emit: EventEmitter = async (name, data, options) => {
+    emitted.push({ name, data, changedOrigin: options.changedOrigin });
+  };
+
+  return { emit, emitted };
+}
+
+function storeWithEmitter(area: StorageArea) {
+  const { emit, emitted } = recordingEmitter();
+  return { store: createNetworkStore(createWalletStorage(area), emit), emitted };
+}
+
 describe("createNetworkStore", () => {
   describe("migrate", () => {
     it("seeds the catalogue on a fresh install", async () => {
@@ -76,6 +93,66 @@ describe("createNetworkStore", () => {
       await store.migrate();
 
       expect(area.writes).toBe(before);
+    });
+
+    /**
+     * ------------------------------------------------------------------------
+     * A CLAMPED CHAIN IS ANNOUNCED, AND ONLY THEN
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: una dApp abierta guarda el chainId de su `eth_chainId` inicial.
+     * Si la migración mueve la red activa y no lo dice, esa dApp se queda con
+     * el valor viejo para siempre y firmaría creyendo estar en otra red.
+     */
+    it("announces the chain change when the active network was clamped", async () => {
+      const area = countingArea({ "cc:chainId": "0xdead" });
+      const { store, emitted } = storeWithEmitter(area);
+
+      await store.migrate();
+
+      expect(emitted).toEqual([
+        { name: "chainChanged", data: DEFAULT_CHAIN_ID, changedOrigin: null },
+      ]);
+    });
+
+    /**
+     * 🇪🇸 NOTA: sin esto, cada despertar del service worker emitiría un
+     * `chainChanged` a todas las dApps conectadas — decenas al día, todos
+     * mintiendo, y cada uno provocando que la dApp vuelva a preguntar y a
+     * repintar.
+     */
+    it("says nothing when there was nothing to clamp", async () => {
+      const area = countingArea();
+      const { store, emitted } = storeWithEmitter(area);
+
+      await store.migrate();
+      await store.migrate();
+
+      expect(emitted).toEqual([]);
+    });
+
+    /** Seeding a fresh install is not a chain change: there was no chain before. */
+    it("says nothing on a fresh install", async () => {
+      const { store, emitted } = storeWithEmitter(countingArea());
+
+      await store.migrate();
+
+      expect(emitted).toEqual([]);
+    });
+
+    /**
+     * 🇪🇸 NOTA: añadir una red también escribe, y no mueve al usuario de red.
+     * Emitir al escribir en vez de al cambiar el valor sería un `chainChanged`
+     * mentiroso en cada alta.
+     */
+    it("says nothing when the write only added a network", async () => {
+      const area = countingArea();
+      const { store, emitted } = storeWithEmitter(area);
+      await store.migrate();
+
+      await store.upsert(POLYGON);
+      await store.migrate();
+
+      expect(emitted).toEqual([]);
     });
 
     it("keeps the active network across a restart", async () => {

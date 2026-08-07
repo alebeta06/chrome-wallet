@@ -131,6 +131,33 @@ navegador salen en paralelo. El test comprobaba un escenario que no ocurre.
 Los tests concurrentes de verdad lanzan las llamadas **sin `await` entre ellas** y
 esperan al final (`await Promise.all([...])`).
 
+### La otra mitad: comprobar que el test falla (aprendido en la Fase 8)
+
+Quitar el `await` intermedio no basta. Un test concurrente puede estar bien
+escrito —dos llamadas sin esperar entre ellas— y aun así no probar nada, porque
+lo que afirma se cumple **con el bug delante**.
+
+Pasó con esto:
+
+```ts
+await Promise.all([store.setActive(POLYGON), store.upsert(BASE)]);
+
+// Sin cadena, una escritura pisa a la otra... y esto sigue pasando.
+expect(findNetwork(networks, chainId)).toBeDefined();
+```
+
+Sin serializar se pierde uno de los dos efectos —o el cambio de red, o el alta—
+pero el catálogo resultante contiene su propia red activa en los dos casos. La
+aserción era sobre un invariante que el bug respeta.
+
+> **Un test de concurrencia que no falla al desactivar la serialización no
+> prueba la serialización.** Compruébalo: rompe la cadena a propósito, corre el
+> test, y si sigue verde es que no sirve.
+
+Lo que hay que afirmar son los **efectos**, uno por llamada concurrente —"la red
+activa es POLYGON **y** BASE está en el catálogo"—, no un invariante que ambas
+ramas satisfacen.
+
 ## Git
 
 - Conventional Commits en inglés, atómicos por unidad lógica

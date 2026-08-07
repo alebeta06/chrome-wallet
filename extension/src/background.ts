@@ -142,7 +142,7 @@ const sender = createTransactionSender();
  * tener cadena. Es la misma razón por la que el coordinador de aprobaciones
  * también se construye una sola vez.
  */
-const networks = createNetworkStore(storage);
+const networks = createNetworkStore(storage, emit);
 
 const dispatch = createDispatcher({ storage, approvals, emit, sender, activeOrigin, networks });
 
