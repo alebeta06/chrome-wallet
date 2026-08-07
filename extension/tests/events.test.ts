@@ -254,3 +254,120 @@ describe("origins that cannot be addressed", () => {
     expect(sent).toEqual([]);
   });
 });
+
+/**
+ * ---------------------------------------------------------------------------
+ * chainChanged: GLOBAL, SIN FILTRAR, Y A TODAS LAS PESTAÑAS
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: los dos tests de este bloque son los que la Fase 8 dejó en lugar del
+ * escenario de Playwright, que se difiere a la Fase 10 (ver
+ * `docs/e2e-backlog.md`). Lo que NO cubren es el tramo content-script → página;
+ * lo que sí cubren es a quién se dirige el evento, que es donde vive la fuga.
+ */
+describe("chainChanged", () => {
+  /**
+   * ------------------------------------------------------------------------
+   * DOS PESTAÑAS DEL MISMO ORIGEN
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: el caso se elige del mismo origen A PROPÓSITO. Con dos orígenes
+   * distintos, un filtro por origen mal puesto pasaría el test igualmente,
+   * porque cada uno recibiría el suyo. Con dos pestañas del mismo origen se caza
+   * además el error clásico —quedarse con `tabs[0]`— y ése es exactamente el
+   * fallo que deja una pestaña enseñando la red vieja mientras la otra ya
+   * cambió: la wallet dice una cosa y la web dice otra.
+   */
+  it("reaches every tab of an origin, not just the first", async () => {
+    const { port, sent } = fakeTabs({ [VERCEL]: [1, 2, 3] });
+    const emit = createEventEmitter(port);
+
+    await emit("chainChanged", "0xaa36a7", {
+      changedOrigin: null,
+      connectedSites: { [VERCEL]: site(VERCEL, 0) },
+    });
+
+    expect(sent.map((entry) => entry.tabId).sort()).toEqual([1, 2, 3]);
+    for (const entry of sent) {
+      expect(entry.message.eventName).toBe("chainChanged");
+      expect(entry.message.data).toBe("0xaa36a7");
+    }
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * GLOBAL NO SIGNIFICA SIN CERRADURA
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: el contrato permite `expectedOrigin: null` y su comentario lo
+   * describe como lo esperable para un evento global. El emisor pone el ORIGEN
+   * igualmente, y eso es deliberado — los dos valores son legales y éste es el
+   * estricto.
+   *
+   * El motivo es lo que pasa cuando una pestaña navega entre el
+   * `chrome.tabs.query` y el `sendMessage`. Los tabId se reciclan y las pestañas
+   * navegan; con `null`, el `chainChanged` aterriza en donde sea que esté ahora
+   * esa pestaña — incluido un sitio NO conectado, que se enteraría de que existe
+   * una wallet y de en qué red está sin haber pedido permiso a nadie. Es la
+   * misma fuga que `eth_accounts` evita devolviendo `[]` a los desconocidos, en
+   * pequeño.
+   *
+   * El precio es un falso negativo diminuto: una pestaña que navegue de una dApp
+   * conectada a otra en esa ventana de milisegundos puede perderse ese evento y
+   * quedarse con la red vieja hasta que recargue. Se prefiere no contarle nada a
+   * un desconocido antes que no perder nunca un evento.
+   *
+   * El alcance —quién recibe— lo decide `eventTargets` del contrato y lo fija el
+   * test de abajo. Esto es la segunda cerradura, y es independiente.
+   */
+  it("keeps the per-tab origin lock even for a global event", async () => {
+    const { port, sent } = fakeTabs({ [VERCEL]: [1], [LOCAL]: [2] });
+    const emit = createEventEmitter(port);
+
+    await emit("chainChanged", "0xaa36a7", {
+      changedOrigin: null,
+      connectedSites: TWO_SITES,
+    });
+
+    expect(sent).toHaveLength(2);
+    expect(sent.find((entry) => entry.tabId === 1)?.message.expectedOrigin).toBe(VERCEL);
+    expect(sent.find((entry) => entry.tabId === 2)?.message.expectedOrigin).toBe(LOCAL);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * EL NEGATIVO DE CONTRASTE: LA ASIMETRÍA, LADO A LADO
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: éste es el test que define el modelo B desde el lado de los
+   * eventos, y por eso las dos mitades van juntas en el mismo test en vez de en
+   * dos: lo que importa no es cada una, es que sean DISTINTAS.
+   *
+   * La red es una propiedad de la wallet → la oyen todos.
+   * La cuenta es una propiedad de la relación wallet-sitio → la oye uno solo.
+   *
+   * Si `accountsChanged` empezara a llegar a todos, la dApp A se enteraría de
+   * qué cuenta usas en la dApp B. Y si `chainChanged` empezara a filtrarse por
+   * origen, la mitad de tus pestañas se quedaría en la red anterior.
+   *
+   * El complemento de esto —que un cambio de red no EMITE `accountsChanged` en
+   * absoluto— se fija en `network-rpc.test.ts`, sobre el handler.
+   */
+  it("goes everywhere, unlike accountsChanged", async () => {
+    const { port, sent } = fakeTabs({ [VERCEL]: [1], [LOCAL]: [2] });
+    const emit = createEventEmitter(port);
+
+    await emit("chainChanged", "0xaa36a7", {
+      changedOrigin: null,
+      connectedSites: TWO_SITES,
+    });
+    const heardTheChain = sent.map((entry) => entry.tabId).sort();
+
+    sent.length = 0;
+
+    await emit("accountsChanged", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"], {
+      changedOrigin: VERCEL,
+      connectedSites: TWO_SITES,
+    });
+    const heardTheAccount = sent.map((entry) => entry.tabId).sort();
+
+    expect(heardTheChain).toEqual([1, 2]);
+    expect(heardTheAccount).toEqual([1]);
+  });
+});

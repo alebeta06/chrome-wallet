@@ -1,3 +1,4 @@
+import { Transaction } from "ethers";
 import { describe, expect, it, vi } from "vitest";
 
 import { ErrorCode, type Address, type Hex, type NetworkConfig } from "@/types/messages";
@@ -33,6 +34,7 @@ interface WriterOptions {
   nonce?: number;
   maxFeePerGas?: bigint | null;
   maxPriorityFeePerGas?: bigint | null;
+  gasPrice?: bigint | null;
   broadcastDelayMs?: number;
   failWith?: unknown;
 }
@@ -56,6 +58,7 @@ function fakeChain(options: WriterOptions = {}) {
       maxFeePerGas: options.maxFeePerGas === undefined ? 2_000_000_000n : options.maxFeePerGas,
       maxPriorityFeePerGas:
         options.maxPriorityFeePerGas === undefined ? 1_000_000_000n : options.maxPriorityFeePerGas,
+      gasPrice: options.gasPrice === undefined ? 3_000_000_000n : options.gasPrice,
     })),
     estimateGas: vi.fn(async () => 21_000n),
     broadcast: vi.fn(async (signed: string) => {
@@ -195,16 +198,27 @@ describe("fees", () => {
    * 🇪🇸 NOTA: 4901 y no -32603. Un nodo que no sabe decir el precio del gas es
    * un problema de red, no un bug de la wallet, y la dApp tiene que poder
    * distinguirlo para decir "reintenta" en vez de "algo se ha roto".
+   *
+   * Desde la Fase 8 hacen falta los TRES a null. Con `gasPrice` puesto no es un
+   * nodo sin precio: es un nodo sin EIP-1559, y eso tiene su propio camino.
    */
   it("answers 4901 when the node has no gas price to give", async () => {
-    const { sender } = fakeChain({ maxFeePerGas: null, maxPriorityFeePerGas: null });
+    const { sender } = fakeChain({
+      maxFeePerGas: null,
+      maxPriorityFeePerGas: null,
+      gasPrice: null,
+    });
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expectCode(send(sender), ErrorCode.CHAIN_DISCONNECTED);
   });
 
   it("still signs when the node gives no price but the dApp did", async () => {
-    const { sender } = fakeChain({ maxFeePerGas: null, maxPriorityFeePerGas: null });
+    const { sender } = fakeChain({
+      maxFeePerGas: null,
+      maxPriorityFeePerGas: null,
+      gasPrice: null,
+    });
 
     const hash = await send(
       sender,
@@ -269,7 +283,7 @@ describe("the nonce", () => {
 
     const writer: ChainWriter = {
       getTransactionCount: async () => 3,
-      getFeeData: async () => ({ maxFeePerGas: 2n, maxPriorityFeePerGas: 1n }),
+      getFeeData: async () => ({ maxFeePerGas: 2n, maxPriorityFeePerGas: 1n, gasPrice: 3n }),
       estimateGas: async () => 21_000n,
       broadcast: async () => {
         if (failNext) {
@@ -364,7 +378,7 @@ describe("what the dApp is told when a send fails", () => {
         },
         getFeeData: async () => {
           if (failing === "getFeeData") throw dead;
-          return { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n };
+          return { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n, gasPrice: 3n };
         },
         estimateGas: async () => {
           if (failing === "estimateGas") throw dead;
@@ -451,6 +465,7 @@ describe("estimate", () => {
     const estimate = await sender.estimate({ network: ANVIL, transaction: transaction() });
 
     expect(estimate).toEqual({
+      txType: 2,
       maxFeePerGas: "0x77359400",
       maxPriorityFeePerGas: "0x3b9aca00",
       gas: "0x5208",
@@ -565,5 +580,100 @@ describe("value and calldata reach the signature", () => {
 
     // The calldata is inside the RLP payload.
     expect(broadcast[0].includes("a9059cbb")).toBe(true);
+  });
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * A CHAIN WITHOUT EIP-1559 IS NOT A CHAIN WITHOUT A PRICE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: hasta la Fase 8 esto era un 4901 — la wallet decía que el nodo no
+ * respondía cuando el nodo había respondido perfectamente y la respuesta era
+ * "aquí no hay 1559". Anvil y Sepolia lo soportan, así que el caso solo aparece
+ * con una red añadida en runtime, y ahí es donde tiene que funcionar.
+ *
+ * El fallback tiene DOS mitades y las dos se prueban: que se active cuando debe,
+ * y —la que se olvida— que NO se active cuando no debe. Una transacción legacy
+ * en una red 1559 paga de más y puede quedarse atascada, que es exactamente el
+ * problema que 1559 vino a resolver.
+ */
+describe("legacy chains", () => {
+  /** The type byte is the first byte of a typed transaction; legacy has none. */
+  function isLegacy(signed: string): boolean {
+    return !signed.startsWith("0x02");
+  }
+
+  it.each([
+    ["maxFeePerGas is null", { maxFeePerGas: null }],
+    ["maxPriorityFeePerGas is null", { maxPriorityFeePerGas: null }],
+    ["both are null", { maxFeePerGas: null, maxPriorityFeePerGas: null }],
+  ])("falls back to a type 0 transaction when %s", async (_label, missing) => {
+    const { sender, broadcast } = fakeChain({ ...missing, gasPrice: 3_000_000_000n });
+
+    await send(sender);
+
+    expect(broadcast).toHaveLength(1);
+    expect(isLegacy(broadcast[0])).toBe(true);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el contraejemplo, y es el que de verdad protege. Sin él, un
+   * fallback demasiado ansioso —o una condición invertida— pasaría los tres
+   * tests de arriba y degradaría a legacy TODAS las transacciones, en Anvil y en
+   * Sepolia incluidas, sin que nada se pusiera rojo.
+   */
+  it("stays on type 2 when the chain supports EIP-1559", async () => {
+    const { sender, broadcast } = fakeChain({ gasPrice: 3_000_000_000n });
+
+    await send(sender);
+
+    expect(broadcast[0].startsWith("0x02")).toBe(true);
+  });
+
+  it("prices the legacy transaction with the node's gasPrice", async () => {
+    const { sender, broadcast } = fakeChain({
+      maxFeePerGas: null,
+      maxPriorityFeePerGas: null,
+      gasPrice: 7n,
+    });
+
+    await send(sender);
+
+    const parsed = Transaction.from(broadcast[0]);
+    expect(parsed.type).toBe(0);
+    expect(parsed.gasPrice).toBe(7n);
+  });
+
+  it("tells the approval window it will be a legacy transaction", async () => {
+    const { sender } = fakeChain({
+      maxFeePerGas: null,
+      maxPriorityFeePerGas: null,
+      gasPrice: 7n,
+    });
+
+    const estimate = await sender.estimate({ network: ANVIL, transaction: transaction() });
+
+    expect(estimate).toEqual({ txType: 0, gasPrice: "0x07", gas: "0x5208" });
+  });
+
+  /**
+   * 🇪🇸 NOTA: las fees explícitas de la dApp siguen ganando. Una dApp que manda
+   * `maxFeePerGas` está pidiendo una transacción 1559 a propósito, y degradarla
+   * a legacy porque el nodo no ofreció precio sería enviar algo distinto de lo
+   * que se pidió.
+   */
+  it("keeps type 2 when the dApp priced it, whatever the node says", async () => {
+    const { sender, broadcast } = fakeChain({
+      maxFeePerGas: null,
+      maxPriorityFeePerGas: null,
+      gasPrice: 7n,
+    });
+
+    await send(
+      sender,
+      transaction({ maxFeePerGas: "0x77359400", maxPriorityFeePerGas: "0x3b9aca00" }),
+    );
+
+    expect(broadcast[0].startsWith("0x02")).toBe(true);
   });
 });

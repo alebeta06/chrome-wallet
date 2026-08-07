@@ -39,17 +39,39 @@ export interface ChainWriter {
    * provider aquí a propósito: firma sin red y el envío es un paso aparte.
    */
   getTransactionCount(address: string, blockTag: "pending"): Promise<number>;
-  getFeeData(): Promise<{ maxFeePerGas: bigint | null; maxPriorityFeePerGas: bigint | null }>;
+  /**
+   * 🇪🇸 NOTA: `gasPrice` además de los dos campos de EIP-1559. Una red que no
+   * implementa 1559 devuelve los dos primeros a null y solo éste con valor, y
+   * sin leerlo no habría forma de fijar el precio de una transacción legacy.
+   */
+  getFeeData(): Promise<FeeData>;
   estimateGas(tx: Record<string, unknown>): Promise<bigint>;
   broadcast(signed: string): Promise<TransactionResponse>;
   destroy(): void;
 }
 
-export interface FeeEstimate {
-  maxFeePerGas: Hex;
-  maxPriorityFeePerGas: Hex;
-  gas: Hex;
+export interface FeeData {
+  maxFeePerGas: bigint | null;
+  maxPriorityFeePerGas: bigint | null;
+  gasPrice: bigint | null;
 }
+
+/**
+ * What a transaction will pay, in one of the two shapes a chain can offer.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO SHAPES, AND THE TYPE MAKES THEM EXCLUSIVE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: una unión discriminada y no tres campos opcionales. Con opcionales,
+ * "1559 a medias" —`maxFeePerGas` puesto y `gasPrice` también— sería un estado
+ * representable, y alguien acabaría firmando una transacción con los dos
+ * campos, que los nodos rechazan. Aquí no se puede escribir.
+ */
+export type Fees =
+  | { txType: 2; maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
+  | { txType: 0; gasPrice: Hex };
+
+export type FeeEstimate = Fees & { gas: Hex };
 
 export interface SendInput {
   network: NetworkConfig;
@@ -255,6 +277,13 @@ async function doSend(
 
     const feeData = await viaNode(network, () => writer.getFeeData());
     const fees = resolveFees(transaction, feeData);
+
+    /**
+     * 🇪🇸 NOTA: null aquí significa que el nodo respondió y no dio NINGÚN precio
+     * —ni 1559 ni legacy—, que es una red que no sabe decir cuánto cuesta
+     * enviar. Sigue siendo 4901 y no -32602: la wallet está bien y la petición
+     * también; el que no sirve es el nodo.
+     */
     if (fees === null) {
       throw new ProviderError({
         code: ErrorCode.CHAIN_DISCONNECTED,
@@ -276,21 +305,29 @@ async function doSend(
       ) as Hex);
 
     /**
-     * 🇪🇸 NOTA: `type: 2` explícito, no confiado a la inferencia. Ethers suele
-     * acertar, pero "suele" no es una garantía y una transacción legacy en una
-     * red EIP-1559 paga de más y puede quedarse atascada. Se comprueba en el
-     * recibo durante las comprobaciones manuales.
+     * 🇪🇸 NOTA: el `type` explícito, no confiado a la inferencia. Ethers suele
+     * acertar, pero "suele" no es una garantía, y el error va en las dos
+     * direcciones: una legacy en una red 1559 paga de más y puede quedarse
+     * atascada; una 1559 en una red que no lo implementa la rechaza el nodo.
+     * Se comprueba en el recibo durante las comprobaciones manuales.
      */
+    const priced =
+      fees.txType === 2
+        ? {
+            type: 2 as const,
+            maxFeePerGas: BigInt(fees.maxFeePerGas),
+            maxPriorityFeePerGas: BigInt(fees.maxPriorityFeePerGas),
+          }
+        : { type: 0 as const, gasPrice: BigInt(fees.gasPrice) };
+
     const signed = await wallet.signTransaction({
-      type: 2,
+      ...priced,
       chainId: BigInt(network.chainId),
       to: transaction.to,
       value: BigInt(transaction.value),
       data: transaction.data,
       nonce,
       gasLimit: BigInt(gas),
-      maxFeePerGas: BigInt(fees.maxFeePerGas),
-      maxPriorityFeePerGas: BigInt(fees.maxPriorityFeePerGas),
     });
 
     const response = await viaNode(network, () => writer.broadcast(signed));
@@ -308,11 +345,23 @@ async function doSend(
  * 🇪🇸 NOTA: si la dApp manda las fees, se respetan. Es una petición legítima —
  * una dApp puede querer acelerar una transacción — y sobrescribirlas en silencio
  * haría que la wallet enviara algo distinto de lo que se le pidió.
+ *
+ * ---------------------------------------------------------------------------
+ * 1559 FIRST, LEGACY ONLY WHEN THE CHAIN CANNOT DO 1559
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: el orden importa y el fallback NO puede activarse de más. Anvil y
+ * Sepolia soportan EIP-1559 y tienen que seguir yendo por `type: 2`: una
+ * transacción legacy en una red 1559 paga de más y puede quedarse atascada, que
+ * es exactamente el problema que 1559 vino a resolver.
+ *
+ * Por eso legacy es la ÚLTIMA opción y solo cuando falta alguno de los dos
+ * campos de 1559 — que es lo que devuelve una red que no lo implementa. Una red
+ * añadida en runtime puede ser cualquiera de las dos cosas, y hasta la Fase 8 el
+ * caso "falta un campo" era un 4901: la wallet decía que el nodo no respondía
+ * cuando el nodo había respondido perfectamente y la respuesta era "aquí no hay
+ * 1559".
  */
-function resolveFees(
-  transaction: ParsedTransaction,
-  feeData: { maxFeePerGas: bigint | null; maxPriorityFeePerGas: bigint | null },
-): { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex } | null {
+function resolveFees(transaction: ParsedTransaction, feeData: FeeData): Fees | null {
   const maxFeePerGas =
     transaction.maxFeePerGas ??
     (feeData.maxFeePerGas === null ? null : (toBeHex(feeData.maxFeePerGas) as Hex));
@@ -321,8 +370,15 @@ function resolveFees(
     transaction.maxPriorityFeePerGas ??
     (feeData.maxPriorityFeePerGas === null ? null : (toBeHex(feeData.maxPriorityFeePerGas) as Hex));
 
-  if (maxFeePerGas === null || maxPriorityFeePerGas === null) return null;
-  return { maxFeePerGas, maxPriorityFeePerGas };
+  if (maxFeePerGas !== null && maxPriorityFeePerGas !== null) {
+    return { txType: 2, maxFeePerGas, maxPriorityFeePerGas };
+  }
+
+  const gasPrice =
+    transaction.gasPrice ?? (feeData.gasPrice === null ? null : (toBeHex(feeData.gasPrice) as Hex));
+
+  if (gasPrice === null) return null;
+  return { txType: 0, gasPrice };
 }
 
 /**

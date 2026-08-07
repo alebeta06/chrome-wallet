@@ -1338,3 +1338,52 @@ origen y la URL propuesta.
 Que una web pueda hacer aparecer un diálogo nativo de permisos con un intento que
 nunca va a prosperar es ruido que no tiene por qué poder provocar. Y el aviso en
 el registro es lo único que distingue una dApp mal configurada de una hostil.
+
+## 69. Cambiar de red con una firma esperando
+
+El caso que la deriva de chainId existe para cerrar:
+
+1. Con Anvil activo, lanza desde la dApp un `eth_sendTransaction` y **no
+   decidas**. Deja la ventana abierta.
+2. Sin cerrarla, abre el popup y cambia a Sepolia.
+3. Vuelve a la ventana de firma y pulsa **Approve**.
+
+Esperado: **-32602**, y el mensaje nombra **Anvil Local** — la red para la que se
+aprobó. No se firma nada, y en el explorador de Sepolia no aparece ninguna
+transacción.
+
+Repítelo con `eth_signTypedData_v4`. Mismo resultado: una firma EIP-712 no toca
+la red, pero su `domain.chainId` se validó contra la que estaba activa al
+empezar, y si la wallet se movió esa validación ya no dice nada.
+
+## 70. La transacción sale como type 2 en una red que soporta 1559
+
+Después de enviar en Anvil o en Sepolia:
+
+```js
+const r = await rpc('eth_getTransactionReceipt', [hash])
+parseInt(r.type, 16)      // 2
+```
+
+Esperado: **2**. El fallback a legacy no puede activarse de más — una
+transacción legacy en una red EIP-1559 paga de más y puede quedarse atascada,
+que es el problema que 1559 vino a resolver.
+
+## 71. Dos pestañas del MISMO origen reciben chainChanged
+
+Abre la dApp **dos veces en la misma URL**, con la consola de las dos visible, y
+en ambas:
+
+```js
+provider.on('chainChanged', (id) => console.log('aquí →', id))
+```
+
+Cambia de red desde el popup. Esperado: **las dos** imprimen.
+
+> El caso es del mismo origen a propósito. Con dos orígenes distintos, un filtro
+> mal puesto pasaría igualmente porque cada uno recibiría el suyo; con dos
+> pestañas iguales se caza además el error clásico de quedarse con la primera —
+> que deja una pestaña enseñando la red vieja mientras la otra ya cambió.
+
+Y en las dos, comprueba que **no** llegó ningún `accountsChanged`: pon el
+listener antes de cambiar de red.

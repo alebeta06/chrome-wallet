@@ -223,11 +223,19 @@ interface PromptProps {
   onReject(): void;
 }
 
-/** Wei * gas, as a hex-free ETH string. Returns null when either is unknown. */
+/**
+ * Wei * gas, as a hex-free ETH string. Returns null when either is unknown.
+ *
+ * 🇪🇸 NOTA: el precio sale de `maxFeePerGas` o de `gasPrice` según el tipo de
+ * transacción — una red sin EIP-1559 solo tiene el segundo. Mirar solo el
+ * primero haría que en esas redes la ventana dijera siempre "no se pudo
+ * estimar", y el usuario aprobaría a ciegas un coste que la wallet sí conocía.
+ */
 function maxCost(transaction: ParsedTransaction): string | null {
-  if (transaction.gas === undefined || transaction.maxFeePerGas === undefined) return null;
+  const price = transaction.maxFeePerGas ?? transaction.gasPrice;
+  if (transaction.gas === undefined || price === undefined) return null;
 
-  const fee = BigInt(transaction.gas) * BigInt(transaction.maxFeePerGas);
+  const fee = BigInt(transaction.gas) * BigInt(price);
   return formatEther(`0x${(fee + BigInt(transaction.value)).toString(16)}`);
 }
 

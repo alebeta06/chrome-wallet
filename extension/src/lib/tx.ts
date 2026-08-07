@@ -52,6 +52,12 @@ export interface ParsedTransaction {
   gas?: Hex;
   maxFeePerGas?: Hex;
   maxPriorityFeePerGas?: Hex;
+  /**
+   * Phase 8, legacy chains only. Never parsed from a dApp: `TransactionRequest`
+   * in the contract has no such field, so it stays in the unknown-field
+   * rejection. The wallet fills it in when the chain cannot do EIP-1559.
+   */
+  gasPrice?: Hex;
   nonce?: Hex;
 }
 

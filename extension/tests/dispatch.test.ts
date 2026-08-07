@@ -1782,6 +1782,122 @@ describe("wallet_reset with connected sites", () => {
  * el permiso desde `chrome://extensions`, y no hay ningún evento que nos avise
  * justo cuando el popup se abre.
  */
+/**
+ * ---------------------------------------------------------------------------
+ * THE NETWORK CAN MOVE WHILE THE USER IS DECIDING
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la ventana de firma puede estar abierta hasta 120 s. En ese hueco el
+ * usuario puede cambiar de red en el popup, otra dApp puede llamar a
+ * `wallet_switchEthereumChain`, o se puede revocar un permiso y la wallet caer a
+ * Anvil sola. La ventana enseñó UNA red; firmar contra otra sería firmar algo
+ * que nadie aprobó.
+ */
+describe("a pending approval whose chain moved", () => {
+  /**
+   * Approves, and switches the network in between — exactly what the browser
+   * can do while the window is open.
+   *
+   * 🇪🇸 NOTA: el `holder` existe porque el área la crea `setup()` y el
+   * coordinador tiene que escribir en ESA, no en otra. Con dos áreas el test
+   * pasaría contando una historia falsa: el cambio de red iría a un storage y
+   * el despachador leería el otro.
+   */
+  function switchingApprovals(to: string) {
+    const holder: { area?: MemoryStorageArea } = {};
+
+    const approvals: ApprovalCoordinator = {
+      requestConnect: async () => 0,
+      requestSignature: async () => {
+        await holder.area?.set({ "cc:chainId": to });
+      },
+      requestAddChain: async () => {},
+      settle: async () => {},
+      reject: async () => {},
+      read: async () => null,
+    };
+
+    return { approvals, holder };
+  }
+
+  function driftingSetup() {
+    const { approvals, holder } = switchingApprovals(SEPOLIA_CHAIN_ID);
+    const fake = fakeSender();
+    const harness = setup(CONNECTED, undefined, undefined, {
+      approvals,
+      sender: fake.sender,
+    });
+    holder.area = harness.area;
+
+    return { ...harness, ...fake };
+  }
+
+  it("refuses to send, naming the network that was approved", async () => {
+    const { dispatch, sent } = driftingSetup();
+
+    const response = await dispatch(
+      request("eth_sendTransaction", SEND_PARAMS),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expectError(response, ErrorCode.INVALID_PARAMS);
+    if (!response.ok) expect(response.error.message).toContain("Anvil Local");
+    expect(sent).toEqual([]);
+  });
+
+  /**
+   * 🇪🇸 NOTA: también para EIP-712, que no toca la red. El `domain.chainId` se
+   * validó contra la red que estaba activa al empezar; si la wallet se movió,
+   * esa validación ya no dice nada y la firma valdría en una cadena que el
+   * usuario no eligió — que es justo lo que la comprobación de dominio existe
+   * para impedir.
+   */
+  it("refuses to sign typed data too", async () => {
+    const { dispatch, typedData } = driftingSetup();
+
+    expectError(
+      await dispatch(request("eth_signTypedData_v4", signParams()), pageSender(LOCAL), RUNTIME_ID),
+      ErrorCode.INVALID_PARAMS,
+    );
+    expect(typedData).toEqual([]);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * REFUSED BEFORE THE MNEMONIC IS EVEN READ
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: no es seguridad —el background puede leer la frase cuando quiera—
+   * es higiene: no se saca el mnemonic a memoria para una firma que ya sabemos
+   * que vamos a tirar. Y es una propiedad del ORDEN de las líneas, que es justo
+   * lo que un refactor rompe sin darse cuenta y sin que nada más se ponga rojo.
+   *
+   * `readKeys` registra qué claves se pidieron a storage, así que el test lo
+   * afirma en vez de confiar en que alguien lea el código.
+   */
+  it("never reads cc:mnemonic for a request it is going to refuse", async () => {
+    const { dispatch, readKeys } = driftingSetup();
+
+    await dispatch(request("eth_sendTransaction", SEND_PARAMS), pageSender(LOCAL), RUNTIME_ID);
+
+    expect(readKeys).not.toContain("cc:mnemonic");
+  });
+
+  it("signs normally when the network did not move", async () => {
+    const { sender, sent } = fakeSender();
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    const response = await dispatch(
+      request("eth_sendTransaction", SEND_PARAMS),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe("switching the network", () => {
   /**
    * 🇪🇸 NOTA: los dos métodos comparten handler porque el efecto es idéntico, y
@@ -2009,7 +2125,12 @@ function fakeSender(options: { fail?: SerializedProviderError; estimate?: FeeEst
     estimate: async (input) => {
       estimated.push(input);
       return options.estimate === undefined
-        ? { maxFeePerGas: "0x77359400", maxPriorityFeePerGas: "0x3b9aca00", gas: "0x5208" }
+        ? {
+            txType: 2 as const,
+            maxFeePerGas: "0x77359400" as const,
+            maxPriorityFeePerGas: "0x3b9aca00" as const,
+            gas: "0x5208" as const,
+          }
         : options.estimate;
     },
     signTypedData: async (input) => {

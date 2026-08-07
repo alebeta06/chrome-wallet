@@ -469,6 +469,38 @@ async function handleRequestAccounts(
 }
 
 /**
+ * ---------------------------------------------------------------------------
+ * THE NETWORK CAN MOVE WHILE THE USER IS DECIDING
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la solicitud captura el chainId al crearse, y entre eso y la
+ * aprobación pueden pasar hasta 120 s. En ese hueco caben tres cosas: el usuario
+ * cambia de red en el popup, otra dApp llama a `wallet_switchEthereumChain`, o
+ * se revoca un permiso y la wallet cae a Anvil sola.
+ *
+ * La ventana enseñó una red. Firmar contra otra sería firmar algo que el usuario
+ * no aprobó — con otro nonce, otras fees y, en el caso de una firma EIP-712, una
+ * firma criptográficamente válida en una cadena que él no eligió. Es la misma
+ * política que el desalineamiento de `domain.chainId`: se rechaza, no se avisa.
+ *
+ * Se comprueba ANTES de leer el mnemonic. No cambia nada de seguridad —el
+ * background podría leerlo cuando quisiera— pero mantiene la frase fuera de
+ * memoria para una firma que ya sabemos que no va a salir. Hay un test que
+ * afirma que `cc:mnemonic` no se llegó a leer.
+ */
+async function assertChainDidNotDrift(
+  networks: NetworkStore,
+  approved: NetworkConfig,
+): Promise<void> {
+  const { chainId } = await networks.read();
+  if (chainId === approved.chainId) return;
+
+  throw invalidParams(
+    `The wallet moved to another network while you were deciding. This request was approved ` +
+      `for ${approved.name} and was not signed.`,
+  );
+}
+
+/**
  * Signs and sends a transaction, after the user says so.
  *
  * ---------------------------------------------------------------------------
@@ -526,6 +558,8 @@ async function handleSendTransaction(
     accountIndex,
     ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
   });
+
+  await assertChainDidNotDrift(networks, network);
 
   /**
    * 🇪🇸 NOTA: el mnemonic se lee DESPUÉS de la aprobación y no antes. No cambia
@@ -612,6 +646,16 @@ async function handleSignTypedData(
     accountIndex,
     ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
   });
+
+  /**
+   * 🇪🇸 NOTA: también aquí, y no solo en el envío. Una firma EIP-712 no toca la
+   * red, así que podría parecer que la red da igual — pero el `domain.chainId`
+   * se validó contra la que estaba activa al empezar. Si la wallet se movió, esa
+   * validación ya no dice nada y la firma valdría en una cadena que el usuario
+   * no eligió, que es justo lo que la comprobación de dominio existe para
+   * impedir.
+   */
+  await assertChainDidNotDrift(networks, network);
 
   const phrase = await storage.get("cc:mnemonic");
   if (phrase === undefined || phrase.length === 0) {
