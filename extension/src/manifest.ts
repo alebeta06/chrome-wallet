@@ -50,6 +50,23 @@ const manifest: chrome.runtime.ManifestV3 = {
   host_permissions: ["http://localhost:8545/*", "https://sepolia.drpc.org/*"],
 
   /**
+   * Hosts the wallet can ASK for at runtime, when the user adds a network.
+   * Declaring them grants nothing: each one still needs an explicit
+   * chrome.permissions.request() from inside a user gesture.
+   *
+   * 🇪🇸 NOTA: el comodín https es lo que la documentación de Chrome recomienda
+   * para hosts que solo se conocen en runtime, y cubre cualquier RPC público.
+   * Los dos de http van aparte porque la política de `isRpcUrlAllowed` solo
+   * permite http en local: un nodo de desarrollo no tiene certificado, y
+   * exigirle https dejaría fuera el caso que más se usa en este proyecto.
+   *
+   * localhost y 127.0.0.1 son DOS patrones, no uno. Un patrón de host no
+   * resuelve nombres: `http://localhost/*` no casa con `http://127.0.0.1:8545`
+   * por mucho que apunten a la misma máquina.
+   */
+  optional_host_permissions: ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+
+  /**
    * 🇪🇸 NOTA: `run_at: "document_start"` es obligatorio, no una optimización.
    * El content script tiene que inyectar el provider ANTES de que la dApp
    * ejecute su primer script; si llega en `document_idle`, el `useEffect` que
