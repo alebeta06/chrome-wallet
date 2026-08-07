@@ -8,16 +8,37 @@
  * construir un despachador entero.
  */
 
-import { ErrorCode, ProviderErrors, type Hex, type NetworkConfig } from "@/types/messages";
+import {
+  ErrorCode,
+  ProviderErrors,
+  type AddEthereumChainParameter,
+  type Hex,
+  type NetworkConfig,
+  type Origin,
+} from "@/types/messages";
 
+import type { ApprovalCoordinator } from "./approvals";
+import type { ChainIdReader } from "./chain";
 import { ProviderError, invalidParams } from "./errors";
 import type { NetworkStore } from "./network-store";
-import { canonicalChainId, findNetwork } from "./networks";
-import { hasPermissionFor, type PermissionsPort } from "./permissions";
+import {
+  canonicalChainId,
+  draftFromParameter,
+  findNetwork,
+  isBuiltIn,
+  toNetworkConfig,
+  type NetworkDraft,
+} from "./networks";
+import { hasPermissionFor, isRpcUrlAllowed, revoke, type PermissionsPort } from "./permissions";
 
-export interface NetworkRpcDeps {
+export interface SwitchChainDeps {
   networks: NetworkStore;
   permissions: PermissionsPort;
+}
+
+export interface AddChainDeps extends SwitchChainDeps {
+  approvals: ApprovalCoordinator;
+  readChainId: ChainIdReader;
 }
 
 /**
@@ -114,7 +135,7 @@ function unreachableChain(network: NetworkConfig): ProviderError {
  * motivo. Hay un test que lo fija.
  */
 export async function switchChain(
-  { networks, permissions }: NetworkRpcDeps,
+  { networks, permissions }: SwitchChainDeps,
   params: unknown[],
   method: string,
 ): Promise<null> {
@@ -143,4 +164,201 @@ export async function switchChain(
   }
 
   return null;
+}
+
+// ============================================================================
+// wallet_addEthereumChain
+// ============================================================================
+
+/**
+ * Turns the EIP-3085 parameter into something we are willing to store, or
+ * refuses with a message naming the field.
+ *
+ * 🇪🇸 NOTA: todo esto pasa ANTES de tocar el catálogo, la red o una ventana.
+ * Una ventana que aparece para algo que la wallet ya sabe que va a rechazar
+ * enseña a la gente a cerrar ventanas sin leerlas, y esa costumbre es lo que
+ * hace que el phishing funcione. Mismo orden que `eth_sendTransaction`.
+ */
+function parseAddChainParams(params: unknown[]): NetworkDraft {
+  const [raw] = params;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw invalidParams("wallet_addEthereumChain expects a single object parameter.");
+  }
+
+  const param = raw as AddEthereumChainParameter;
+  const draft = draftFromParameter(param);
+
+  if (draft === null) {
+    throw invalidParams(
+      'wallet_addEthereumChain needs a hex "chainId", a non-empty "chainName", at least one ' +
+        '"rpcUrls" entry, and a "nativeCurrency" with a "symbol" and integer "decimals".',
+    );
+  }
+
+  /**
+   * 🇪🇸 NOTA: la política del RPC va aparte del parseo y con su propio mensaje.
+   * "Falta un campo" y "ese campo es http contra internet" son dos errores
+   * distintos para quien depura una dApp, y colapsarlos en un -32602 genérico
+   * obliga a adivinar cuál de los dos fue.
+   */
+  if (!isRpcUrlAllowed(draft.rpcUrl)) {
+    throw invalidParams(
+      'wallet_addEthereumChain requires the first "rpcUrls" entry to be https, or plain http ' +
+        "only on localhost or 127.0.0.1.",
+    );
+  }
+
+  return draft;
+}
+
+/** The parameter as it will be persisted, for the window to render. */
+function normalisedParameter(draft: NetworkDraft): AddEthereumChainParameter {
+  return {
+    chainId: draft.chainId,
+    chainName: draft.name,
+    rpcUrls: [draft.rpcUrl],
+    nativeCurrency: { ...draft.nativeCurrency },
+    ...(draft.explorerUrl === null ? {} : { blockExplorerUrls: [draft.explorerUrl] }),
+  };
+}
+
+/**
+ * Adds a network, after the user says so and the endpoint proves who it is.
+ *
+ * ---------------------------------------------------------------------------
+ * IDEMPOTENCE IS ABOUT THE DESIRED STATE, NOT ABOUT THE INPUT
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la trampa está en la fila que no es obvia. "Mismo chainId y mismo
+ * rpcUrl → devuelve null sin ventana" parece la definición de idempotente, pero
+ * si el permiso está revocado la red NO está operativa: no hay nada que
+ * cortocircuitar, porque el estado deseado no se ha alcanzado.
+ *
+ * Y el atajo cerraba un ciclo: `wallet_switchEthereumChain` responde 4902
+ * diciendo "vuelve a añadirla", y el alta devolvía `null` sin reconceder nada.
+ * La dApp hacía exactamente lo que se le pedía y volvía al mismo 4902 para
+ * siempre. Con la reconcesión, ese consejo lleva a algún sitio.
+ */
+export async function addChain(
+  { networks, permissions, approvals, readChainId }: AddChainDeps,
+  params: unknown[],
+  context: { origin: Origin; tabId?: number },
+): Promise<null> {
+  const draft = parseAddChainParams(params);
+  const { networks: catalogue } = await networks.read();
+  const existing = findNetwork(catalogue, draft.chainId);
+
+  /**
+   * ------------------------------------------------------------------------
+   * A BUILT-IN IS NEVER REPOINTED, AND SAYING SO IS PART OF THE JOB
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: se rechaza en la validación, sin ventana y sin pedir permiso. Que
+   * una dApp pueda hacer aparecer un diálogo nativo de Chrome con un intento
+   * que no va a prosperar es ruido que no tiene por qué poder provocar.
+   *
+   * Y se rechaza con -32602 en vez de devolver `null` en silencio como hace
+   * MetaMask: `upsertNetwork` ya lo bloquea de todas formas, así que un `null`
+   * le diría a la dApp que su RPC quedó configurado cuando no es verdad. Un
+   * error que se entiende vale más que un éxito que miente.
+   *
+   * El `console.warn` es deliberado: un intento de reapuntar "Sepolia" a otro
+   * nodo es exactamente lo que se quiere ver en el registro, y es lo único que
+   * distingue una dApp mal configurada de una hostil.
+   */
+  if (isBuiltIn(draft.chainId) && existing !== undefined) {
+    if (existing.rpcUrl === draft.rpcUrl) return null;
+
+    console.warn(
+      `[codecrypto] ${context.origin} tried to repoint the built-in ${existing.name} ` +
+        `at ${draft.rpcUrl}`,
+    );
+    throw invalidParams(
+      `"${existing.name}" is built into CodeCrypto Wallet and its RPC endpoint cannot be changed.`,
+    );
+  }
+
+  const permitted = await hasPermissionFor(permissions, draft.rpcUrl);
+
+  // Already exactly what was asked for, and reachable. Nothing to decide.
+  if (existing !== undefined && existing.rpcUrl === draft.rpcUrl && permitted) return null;
+
+  /**
+   * 🇪🇸 NOTA: alta, sobrescritura y reconcesión abren la MISMA ventana y
+   * persisten la misma solicitud. Cuál de las tres es lo deduce la ventana
+   * comparando el parámetro con `wallet_getState` —que ya le dice si la red
+   * existe y si su permiso falta— así que no hace falta un campo nuevo en el
+   * contrato para algo que se puede derivar de lo que ya viaja.
+   */
+  // Rejects with 4001 if the user says no, denies the native dialog, or closes
+  // the window. The window is what calls chrome.permissions.request().
+  await approvals.requestAddChain({
+    origin: context.origin,
+    chain: normalisedParameter(draft),
+    ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
+  });
+
+  /**
+   * 🇪🇸 NOTA: se vuelve a preguntar por el permiso aunque la ventana solo
+   * aprueba después de conseguirlo. Es la única fuente que el spike de la Fase 8
+   * demostró fiable, y entre la concesión y este punto ha habido un salto de
+   * proceso. Si faltara, seguir adelante significaría llamar al RPC sin permiso
+   * y devolver un 4901 que culparía al nodo de algo nuestro.
+   */
+  if (!(await hasPermissionFor(permissions, draft.rpcUrl))) {
+    throw new ProviderError(
+      ProviderErrors.userRejected("The permission to reach that RPC endpoint was not granted."),
+    );
+  }
+
+  const candidate = toNetworkConfig(draft, Date.now(), false);
+
+  /**
+   * 🇪🇸 NOTA: si el nodo no contesta se propaga el 4901 y el permiso SE
+   * CONSERVA. No sabemos nada malo del endpoint —solo que ahora mismo no está—
+   * y revocar por un parpadeo obligaría al usuario a pasar otra vez por el
+   * diálogo nativo entero. Reintentar más tarde funciona sin segundo diálogo.
+   */
+  const reported = await readChainId(candidate);
+
+  if (canonicalChainId(reported) !== draft.chainId) {
+    await revokeAfterLie(permissions, draft, reported);
+
+    throw invalidParams(
+      `That endpoint reports chain ${String(reported)}, not ${draft.chainId}. ` +
+        "The network was not added.",
+    );
+  }
+
+  await networks.upsert(candidate);
+
+  /**
+   * 🇪🇸 NOTA: NO se cambia de red y NO se emite `chainChanged`. Añadir una red
+   * es ponerla en la lista, no meter al usuario en ella — MetaMask lo pregunta
+   * aparte, y aquí basta con que use el selector. Cambiar de red como efecto
+   * secundario de un alta movería al usuario a una cadena recién aprobada sin
+   * que lo haya pedido.
+   */
+  return null;
+}
+
+/**
+ * The one case where a granted permission is taken back.
+ *
+ * 🇪🇸 NOTA: `remove()` puede resolver `true` sin revocar nada — medido en Brave
+ * durante el spike de la Fase 8 — así que `revoke()` vuelve a preguntar con
+ * `contains()`. Y si no se pudo revocar, la llamada falla IGUAL: no se da de
+ * alta una red que mintió sobre su cadena solo porque no pudimos limpiar el
+ * permiso. Queda el aviso en la consola del worker y nada más.
+ */
+async function revokeAfterLie(
+  permissions: PermissionsPort,
+  draft: NetworkDraft,
+  reported: unknown,
+): Promise<void> {
+  console.warn(
+    `[codecrypto] ${draft.rpcUrl} declared ${draft.chainId} and reports ${String(reported)}`,
+  );
+
+  if (!(await revoke(permissions, draft.rpcUrl))) {
+    console.error(`[codecrypto] could not revoke the host permission for ${draft.rpcUrl}`);
+  }
 }

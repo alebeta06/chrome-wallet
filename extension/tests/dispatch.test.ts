@@ -12,6 +12,7 @@ import {
   type WalletSnapshot,
 } from "@/types/messages";
 import type {
+  AddChainRequestInput,
   ApprovalCoordinator,
   ConnectRequestInput,
   SignatureRequestInput,
@@ -133,6 +134,7 @@ function recordingEmitter() {
 function fakeApprovals(outcome: { approve: number } | { reject: SerializedProviderError }) {
   const asked: ConnectRequestInput[] = [];
   const signed: SignatureRequestInput[] = [];
+  const chains: AddChainRequestInput[] = [];
 
   const approvals: ApprovalCoordinator = {
     requestConnect: async (input) => {
@@ -144,12 +146,16 @@ function fakeApprovals(outcome: { approve: number } | { reject: SerializedProvid
       signed.push(input);
       if (!("approve" in outcome)) throw new ProviderError(outcome.reject);
     },
+    requestAddChain: async (input) => {
+      chains.push(input);
+      if (!("approve" in outcome)) throw new ProviderError(outcome.reject);
+    },
     settle: async () => {},
     reject: async () => {},
     read: async () => null,
   };
 
-  return { approvals, asked, signed };
+  return { approvals, asked, signed, chains };
 }
 
 /**
@@ -242,30 +248,41 @@ describe("the trust boundary", () => {
   });
 
   /**
-   * 🇪🇸 NOTA: este test usaba `eth_accounts`, que en la Fase 3 ya está
-   * implementado; luego a `eth_requestAccounts` (Fase 5), `eth_sendTransaction`
-   * (Fase 6) y `eth_signTypedData_v4` (Fase 7). Ahora vive en
-   * `wallet_switchEthereumChain` (Fase 8, esta misma). Ahora vive en
-   * `wallet_addEthereumChain`, que es el ÚLTIMO método público sin implementar
-   * del contrato: cuando aterrice, este test se queda sin sitio al que mudarse y
-   * habrá que borrarlo.
+   * ------------------------------------------------------------------------
+   * NINGÚN MÉTODO PÚBLICO RESPONDE 4100 A UNA PÁGINA
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: este test se ha mudado cada dos fases. Empezó en `eth_accounts`,
+   * pasó por `eth_requestAccounts`, `eth_sendTransaction`,
+   * `eth_signTypedData_v4` y `wallet_switchEthereumChain`, siempre apuntando al
+   * método público que todavía no estaba implementado y afirmando que daba 4200
+   * y no 4100. Con `wallet_addEthereumChain` en su sitio ya no queda ninguno, así
+   * que en vez de borrarlo se escribe la propiedad que perseguía y que no
+   * caduca: la puerta deja pasar la superficie pública ENTERA.
    *
-   * Lo que comprueba no es el método concreto: es que la puerta y la
-   * implementación son dos cosas distintas. Un método público sin implementar
-   * tiene que dar 4200 —pasó el control de emisor y cayó por el `default`—, no
-   * 4100. Si algún día diera 4100, sería que la frontera está rechazando métodos
-   * públicos y ninguna dApp podría hablar con la wallet.
+   * Se llama a cada método público con params vacíos desde un origen conectado.
+   * Da igual con qué fallen —casi todos con -32602— porque lo que se afirma es
+   * lo que NO pueden contestar: un 4100 aquí significaría que la frontera está
+   * rechazando métodos públicos, y ninguna dApp podría hablar con la wallet.
    *
-   * Que este test tenga que mudarse cada dos fases es buena señal: significa que
-   * la superficie pública se va implementando.
+   * El origen va conectado a propósito: sin conexión, un 4100 de
+   * `eth_sendTransaction` sería correcto y taparía el caso que importa.
    */
-  it("lets a public method through the gate (it just is not implemented yet)", async () => {
-    const { dispatch } = setup();
+  it.each([
+    "eth_requestAccounts",
+    "eth_accounts",
+    "eth_chainId",
+    "eth_getBalance",
+    "eth_sendTransaction",
+    "eth_signTypedData_v4",
+    "wallet_switchEthereumChain",
+    "wallet_addEthereumChain",
+    "wallet_revokePermissions",
+  ])("never answers 4100 to a connected page for %s", async (method) => {
+    const { dispatch } = setup(CONNECTED);
 
-    expectError(
-      await dispatch(request("wallet_addEthereumChain"), pageSender(), RUNTIME_ID),
-      ErrorCode.UNSUPPORTED_METHOD,
-    );
+    const response = await dispatch(request(method), pageSender(LOCAL), RUNTIME_ID);
+
+    if (!response.ok) expect(response.error.code).not.toBe(ErrorCode.UNAUTHORIZED);
   });
 
   it("answers an unknown method with 4200", async () => {
@@ -1335,6 +1352,11 @@ function connected(origin: string, accountIndex: number): ConnectedSite {
   return { origin, accountIndex, connectedAt: 1_000, lastUsedAt: 1_000 };
 }
 
+const CONNECTED = {
+  ...LOADED_WALLET,
+  "cc:connectedSites": { [LOCAL]: connected(LOCAL, 0) },
+};
+
 /** A wallet with two origins already connected to two different accounts. */
 const TWO_CONNECTED = {
   ...LOADED_WALLET,
@@ -2003,11 +2025,6 @@ function fakeSender(options: { fail?: SerializedProviderError; estimate?: FeeEst
 const SEND_PARAMS = [{ to: ANVIL_SECOND, value: "0xde0b6b3a7640000" }];
 
 /** localhost connected to account 0 (ANVIL_FIRST). */
-const CONNECTED = {
-  ...LOADED_WALLET,
-  "cc:connectedSites": { [LOCAL]: connected(LOCAL, 0) },
-};
-
 describe("eth_sendTransaction", () => {
   it("signs and returns the hash after approval", async () => {
     const { approvals } = fakeApprovals({ approve: 0 });

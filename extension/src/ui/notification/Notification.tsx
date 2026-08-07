@@ -3,14 +3,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ProviderErrors,
   type DecisionMessage,
+  type NetworkConfig,
+  type PendingAddChainRequest,
   type PendingSignatureRequest,
   type RequestId,
 } from "@/types/messages";
 import { formatEther, shortenAddress } from "@/lib/format";
-import { defaultNetworks } from "@/lib/networks";
 import { functionSelector, isContractCall, type ParsedTransaction } from "@/lib/tx";
 import { callBackground, toRpcError } from "@/ui/rpc";
 import { useApprovalPort } from "@/ui/connect/useApprovalPort";
+import { AddChainPrompt } from "./AddChainPrompt";
 import { TypedDataPrompt } from "./TypedDataPrompt";
 
 function readRequestId(): RequestId | null {
@@ -20,7 +22,8 @@ function readRequestId(): RequestId | null {
 
 type Phase =
   | { status: "loading" }
-  | { status: "ready"; request: PendingSignatureRequest }
+  | { status: "ready"; request: PendingSignatureRequest; networks: NetworkConfig[] }
+  | { status: "addChain"; request: PendingAddChainRequest }
   | { status: "gone"; message: string }
   | { status: "deciding" };
 
@@ -44,6 +47,11 @@ export function Notification() {
         const request = await callBackground("wallet_getPendingRequest", { requestId });
         if (cancelled) return;
 
+        if (request !== null && request.kind === "add-chain") {
+          setPhase({ status: "addChain", request });
+          return;
+        }
+
         if (request === null || request.kind !== "signature") {
           setPhase({
             status: "gone",
@@ -52,7 +60,20 @@ export function Notification() {
           return;
         }
 
-        setPhase({ status: "ready", request });
+        /**
+         * 🇪🇸 NOTA: el catálogo se pide al background en vez de importar
+         * `defaultNetworks()`. Desde la Fase 8 las redes viven en storage, así
+         * que la lista de código solo tiene las dos de serie: una firma en una
+         * red que el usuario añadió enseñaría su chainId en crudo donde debería
+         * ir su nombre — y la ventana de firma es justo donde eso importa.
+         *
+         * Si falla, se sigue con la lista vacía: el prompt cae a mostrar el
+         * chainId, que es peor pero no impide decidir.
+         */
+        const snapshot = await callBackground("wallet_getState").catch(() => null);
+        if (cancelled) return;
+
+        setPhase({ status: "ready", request, networks: snapshot?.networks ?? [] });
       } catch (cause) {
         if (!cancelled) setPhase({ status: "gone", message: toRpcError(cause).message });
       }
@@ -104,6 +125,31 @@ export function Notification() {
     );
   }
 
+  if (phase.status === "addChain") {
+    return (
+      <AddChainPrompt
+        request={phase.request}
+        onApprove={() =>
+          decide({
+            type: "CODECRYPTO_DECISION",
+            requestId: phase.request.id,
+            kind: "add-chain",
+            approved: true,
+          })
+        }
+        onReject={(reason) =>
+          decide({
+            type: "CODECRYPTO_DECISION",
+            requestId: phase.request.id,
+            kind: "add-chain",
+            approved: false,
+            error: ProviderErrors.userRejected(reason),
+          })
+        }
+      />
+    );
+  }
+
   if (phase.status === "deciding") {
     return (
       <main className="approval">
@@ -148,6 +194,7 @@ export function Notification() {
   return (
     <SignPrompt
       request={phase.request}
+      networks={phase.networks}
       onApprove={() =>
         decide({
           type: "CODECRYPTO_DECISION",
@@ -171,6 +218,7 @@ export function Notification() {
 
 interface PromptProps {
   request: PendingSignatureRequest;
+  networks: NetworkConfig[];
   onApprove(): void;
   onReject(): void;
 }
@@ -183,7 +231,7 @@ function maxCost(transaction: ParsedTransaction): string | null {
   return formatEther(`0x${(fee + BigInt(transaction.value)).toString(16)}`);
 }
 
-function SignPrompt({ request, onApprove, onReject }: PromptProps) {
+function SignPrompt({ request, networks, onApprove, onReject }: PromptProps) {
   const [showData, setShowData] = useState(false);
 
   /**
@@ -192,7 +240,7 @@ function SignPrompt({ request, onApprove, onReject }: PromptProps) {
    * mirar lo que dijo la dApp: enseña lo que se va a firmar.
    */
   const transaction = request.params[0] as ParsedTransaction;
-  const network = defaultNetworks().find((entry) => entry.chainId === request.chainId);
+  const network = networks.find((entry) => entry.chainId === request.chainId);
   const contractCall = isContractCall(transaction);
   const total = maxCost(transaction);
 

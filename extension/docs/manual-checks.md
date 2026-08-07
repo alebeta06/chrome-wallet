@@ -1201,3 +1201,140 @@ Esperado: funciona, y `eth_chainId` devuelve `"0xaa36a7"` — en minúsculas y s
 el cero. Un `0x01` no es una petición rara: es el mismo número escrito de otra
 forma, y obligar a la dApp a conocer nuestra forma canónica sería un detalle
 nuestro filtrándose hacia fuera.
+
+## 63. Añadir una red desde la dApp
+
+Necesitas un segundo Anvil para tener una red real que añadir:
+
+```bash
+anvil --port 8546 --chain-id 1338
+```
+
+Desde la consola de la dApp conectada:
+
+```js
+await provider.request({
+  method: 'wallet_addEthereumChain',
+  params: [{
+    chainId: '0x53a',                       // 1338
+    chainName: 'Anvil Two',
+    rpcUrls: ['http://localhost:8546'],
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  }],
+})
+```
+
+Esperado, en este orden:
+
+1. Se abre `notification.html` diciendo **"A site wants to add a network"**, con
+   la URL **entera y sin truncar**.
+2. Al pulsar **Add network**, Chrome abre su propio diálogo de permisos.
+3. Al aceptarlo, la llamada devuelve `null`.
+4. La red aparece en `wallet_getState().networks`.
+5. **NO se cambió de red.** `eth_chainId` sigue devolviendo Anvil, y no llegó
+   ningún `chainChanged`. Añadir una red es ponerla en la lista, no meterte en
+   ella.
+
+## 64. El RPC que miente sobre su chainId
+
+Con el segundo Anvil corriendo en 8546 con chainId **1338**, pide añadirlo
+declarando otro:
+
+```js
+await provider.request({
+  method: 'wallet_addEthereumChain',
+  params: [{
+    chainId: '0x2a',                        // 42 — mentira
+    chainName: 'Fake',
+    rpcUrls: ['http://localhost:8546'],
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  }],
+}).catch((e) => console.log(e.code, e.message))
+```
+
+Esperado, las tres cosas:
+
+- **-32602**, y el mensaje dice qué cadena reporta de verdad.
+- La red **no** está en `wallet_getState().networks`.
+- **El permiso quedó revocado**: en `chrome://extensions` → Site access,
+  `localhost:8546` ya no aparece. Compruébalo ahí, no fiándote del error.
+
+Esta es la única situación en la que la wallet le quita al usuario un permiso
+que concedió. Si el permiso sigue puesto, hay un bug — o `remove()` no funcionó,
+y entonces el worker tiene que haber dejado un `console.error` diciéndolo.
+
+## 65. El nodo caído NO cuesta el permiso
+
+Para el segundo Anvil (`Ctrl-C`) y repite la comprobación 63 con `0x53a`.
+
+Esperado: **4901**, la red no se añade, y **el permiso SIGUE concedido**.
+Vuelve a levantar Anvil, repite la llamada: funciona **sin que Chrome vuelva a
+abrir el diálogo de permisos**, porque nunca se retiró.
+
+Es la diferencia entre "mintió" y "no está": revocar por un parpadeo del nodo
+obligaría a pasar otra vez por el diálogo nativo entero.
+
+## 66. Reconceder una red revocada
+
+El ciclo completo, que es el que un atajo de idempotencia habría roto:
+
+1. Añade Anvil Two (comprobación 63) y cambia a ella con
+   `wallet_switchEthereumChain`.
+2. En `chrome://extensions` → Site access, quita `localhost:8546`.
+3. La wallet cae a Anvil sola y la dApp recibe `chainChanged` (comprobación 58).
+4. `wallet_switchEthereumChain` a `0x53a` → **4902** mencionando
+   `wallet_addEthereumChain`.
+5. Llama a `wallet_addEthereumChain` **con exactamente los mismos params** de la
+   comprobación 63.
+
+Esperado en el paso 5: **se abre una ventana** que dice *"restore access"*, no un
+`null` silencioso. Tras aprobar y reconceder el permiso, el `switch` del paso 4
+funciona.
+
+> Si el paso 5 devuelve `null` sin abrir nada, el consejo del 4902 no lleva a
+> ninguna parte y la red queda inalcanzable para siempre desde la dApp.
+
+## 67. Dos altas a la vez con RPC distinto
+
+En la consola de la dApp, **sin `await` entre las dos**:
+
+```js
+const uno = provider.request({ method: 'wallet_addEthereumChain', params: [{
+  chainId: '0x53a', chainName: 'Anvil Two', rpcUrls: ['http://localhost:8546'],
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+}]})
+const dos = provider.request({ method: 'wallet_addEthereumChain', params: [{
+  chainId: '0x53a', chainName: 'Anvil Two', rpcUrls: ['http://localhost:8547'],
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+}]})
+```
+
+Esperado: **DOS ventanas**, cada una con su URL. Son dos preguntas distintas.
+
+Si saliera una sola, aprobarla estaría aprobando también una URL que nunca
+apareció en pantalla — y eso no es un problema de comodidad.
+
+Repite con los dos params **idénticos**: ahí sí, **una sola ventana**, y las dos
+promesas se resuelven con ella.
+
+## 68. Una dApp no puede reapuntar una red de serie
+
+```js
+await provider.request({
+  method: 'wallet_addEthereumChain',
+  params: [{
+    chainId: '0xaa36a7',                    // Sepolia
+    chainName: 'Sepolia',
+    rpcUrls: ['http://localhost:8546'],
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  }],
+}).catch((e) => console.log(e.code, e.message))
+```
+
+Esperado: **-32602** nombrando Sepolia, **sin abrir ventana** y **sin que Chrome
+pida ningún permiso**. Y en la consola del service worker, un `warn` con el
+origen y la URL propuesta.
+
+Que una web pueda hacer aparecer un diálogo nativo de permisos con un intento que
+nunca va a prosperar es ruido que no tiene por qué poder provocar. Y el aviso en
+el registro es lo único que distingue una dApp mal configurada de una hostil.

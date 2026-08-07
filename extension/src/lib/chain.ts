@@ -72,6 +72,36 @@ export function createRpcProvider(network: NetworkConfig): JsonRpcProvider {
 }
 
 /**
+ * Asks an endpoint which chain it actually serves.
+ *
+ * ---------------------------------------------------------------------------
+ * THE ONE CALL WHOSE ANSWER WE DO NOT TRUST IN ADVANCE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: esto verifica que un RPC propuesto es de verdad la cadena que la
+ * dApp dice. `send` crudo y no `getNetwork()`: el provider se construye con la
+ * red DECLARADA y `staticNetwork: true` justamente para no gastar peticiones,
+ * así que `getNetwork()` devolvería lo que le dimos —la afirmación que estamos
+ * intentando comprobar— en vez de lo que dice el nodo. Un `send("eth_chainId")`
+ * va al cable y vuelve con la verdad.
+ *
+ * Que el provider lleve dentro un chainId posiblemente falso no afecta: no se
+ * usa para nada más que para no detectar la red.
+ */
+export type ChainIdReader = (network: NetworkConfig) => Promise<string>;
+
+export const fetchChainId: ChainIdReader = async (network) => {
+  const provider = createRpcProvider(network);
+
+  try {
+    return (await provider.send("eth_chainId", [])) as string;
+  } catch (cause) {
+    throw unreachable(network, cause);
+  } finally {
+    provider.destroy();
+  }
+};
+
+/**
  * 🇪🇸 NOTA: 4901 (CHAIN_DISCONNECTED) y no -32603. La diferencia importa para
  * la UI: -32603 significa "hay un bug", 4901 significa "tu wallet está bien, el
  * nodo no responde". Con Anvil apagado el popup tiene que seguir mostrando las
@@ -82,7 +112,7 @@ export function createRpcProvider(network: NetworkConfig): JsonRpcProvider {
  */
 function unreachable(network: NetworkConfig, cause: unknown): ProviderError {
   // Full detail stays in the service worker console; the wire gets a code.
-  console.error(`[codecrypto] balance lookup failed on ${network.name}:`, cause);
+  console.error(`[codecrypto] an rpc call failed on ${network.name}:`, cause);
 
   return new ProviderError({
     code: ErrorCode.CHAIN_DISCONNECTED,

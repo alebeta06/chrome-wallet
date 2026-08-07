@@ -697,3 +697,126 @@ describe("truly concurrent requests", () => {
     for (const promise of inFlight) void promise.catch(() => {});
   });
 });
+
+/**
+ * ---------------------------------------------------------------------------
+ * ADD-CHAIN: WHAT COUNTS AS "THE SAME QUESTION"
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la deduplicación de `connect` es por `kind + origin`, porque para un
+ * origen solo hay una pregunta posible: "¿te dejo conectar?". Un alta de red
+ * tiene parámetros, así que dos altas del mismo origen pueden ser dos preguntas
+ * completamente distintas — y ahí una fusión no es una comodidad, es aprobar
+ * algo que nadie enseñó.
+ */
+describe("add-chain deduplication", () => {
+  const POLYGON = {
+    chainId: "0x89" as const,
+    chainName: "Polygon",
+    rpcUrls: ["https://polygon-rpc.com"],
+    nativeCurrency: { name: "Polygon Ecosystem Token", symbol: "POL", decimals: 18 },
+  };
+
+  const POLYGON_ELSEWHERE = { ...POLYGON, rpcUrls: ["https://other-polygon.example"] };
+
+  /**
+   * 🇪🇸 NOTA: sin `await` entre las dos llamadas. Es la regla de la Fase 6: un
+   * `await` intermedio serializa artificialmente dos peticiones que el navegador
+   * lanza en paralelo, y el test acabaría comprobando un escenario que no
+   * ocurre.
+   */
+  it("opens one window for two identical requests from the same origin", async () => {
+    const { coordinator, opened, area } = setup();
+
+    const first = coordinator.requestAddChain({ origin: VERCEL, chain: POLYGON });
+    const second = coordinator.requestAddChain({ origin: VERCEL, chain: POLYGON });
+
+    await flush();
+    expect(opened).toHaveLength(1);
+
+    const [id] = Object.keys(
+      (area.snapshot()["cc:pendingRequests"] as Record<RequestId, PendingRequest>) ?? {},
+    );
+    await coordinator.settle(id, {
+      type: "CODECRYPTO_DECISION",
+      requestId: id,
+      kind: "add-chain",
+      approved: true,
+    });
+
+    // Both callers share the one decision.
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE ONE THAT IS A SECURITY BUG, NOT A UX BUG
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: mismo chainId, RPC distinto. Si esto se fusionara, el usuario vería
+   * UNA ventana con UNA url, la aprobaría, y la wallet daría por aprobada
+   * también la otra — una URL que nunca apareció en pantalla. Por eso la clave
+   * de deduplicación lleva el rpcUrl dentro.
+   */
+  it("opens two windows when the same chain is offered a different endpoint", async () => {
+    const { coordinator, opened } = setup();
+
+    void coordinator.requestAddChain({ origin: VERCEL, chain: POLYGON });
+    void coordinator.requestAddChain({ origin: VERCEL, chain: POLYGON_ELSEWHERE });
+
+    await flush();
+    expect(opened).toHaveLength(2);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el modelo por origen. Una ventana que nombra a `app-a` no puede
+   * resolver lo que pidió `app-b`: sería consentimiento mostrado a uno y
+   * aplicado a otro. La segunda mitad del test es la que lo fija — tras resolver
+   * la primera, la segunda SIGUE pendiente.
+   */
+  it("keeps two origins apart even when they ask for exactly the same chain", async () => {
+    const { coordinator, opened, area } = setup();
+
+    void coordinator.requestAddChain({ origin: VERCEL, chain: POLYGON });
+    void coordinator.requestAddChain({ origin: LOCAL, chain: POLYGON });
+
+    await flush();
+    expect(opened).toHaveLength(2);
+
+    const stored = (area.snapshot()["cc:pendingRequests"] ?? {}) as Record<
+      RequestId,
+      PendingRequest
+    >;
+    const fromVercel = Object.values(stored).find((entry) => entry.origin === VERCEL);
+    expect(fromVercel).toBeDefined();
+
+    await coordinator.settle(fromVercel!.id, {
+      type: "CODECRYPTO_DECISION",
+      requestId: fromVercel!.id,
+      kind: "add-chain",
+      approved: true,
+    });
+
+    const left = Object.values(
+      (area.snapshot()["cc:pendingRequests"] ?? {}) as Record<RequestId, PendingRequest>,
+    );
+    expect(left).toHaveLength(1);
+    expect(left[0].origin).toBe(LOCAL);
+  });
+
+  it("rejects with 4001 when the window is closed", async () => {
+    const { coordinator, area } = setup();
+
+    const pending = coordinator.requestAddChain({ origin: VERCEL, chain: POLYGON });
+    await flush();
+
+    const [id] = Object.keys(
+      (area.snapshot()["cc:pendingRequests"] as Record<RequestId, PendingRequest>) ?? {},
+    );
+    await coordinator.reject(id, {
+      code: ErrorCode.USER_REJECTED,
+      message: "The approval window was closed.",
+    });
+
+    await expect(pending).rejects.toBeInstanceOf(ProviderError);
+  });
+});

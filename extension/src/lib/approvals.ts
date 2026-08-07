@@ -32,10 +32,12 @@
 import {
   APPROVAL_TIMEOUT_MS,
   ProviderErrors,
+  type AddEthereumChainParameter,
   type Address,
   type DecisionMessage,
   type Hex,
   type Origin,
+  type PendingAddChainRequest,
   type PendingConnectRequest,
   type PendingKind,
   type PendingRequest,
@@ -89,11 +91,23 @@ export interface SignatureRequestInput {
   tabId?: number;
 }
 
+export interface AddChainRequestInput {
+  origin: Origin;
+  /** Already validated and normalised: chainId canonical, one rpcUrl. */
+  chain: AddEthereumChainParameter;
+  tabId?: number;
+}
+
 export interface ApprovalCoordinator {
   /** Resolves with the account index the user chose, or rejects with 4001. */
   requestConnect(input: ConnectRequestInput): Promise<number>;
   /** Resolves when the user approves, or rejects with 4001. */
   requestSignature(input: SignatureRequestInput): Promise<void>;
+  /**
+   * Resolves once the user approved AND the window got the host permission.
+   * Rejects with 4001 if they said no, denied the permission, or closed it.
+   */
+  requestAddChain(input: AddChainRequestInput): Promise<void>;
   /** The user approved. First settle wins; later calls are no-ops. */
   settle(requestId: RequestId, decision: ApprovedDecision): Promise<void>;
   /** The user said no, the window closed, or the clock ran out. */
@@ -101,6 +115,17 @@ export interface ApprovalCoordinator {
   /** Backs wallet_getPendingRequest so the approval window can render itself. */
   read(requestId: RequestId): Promise<PendingRequest | null>;
 }
+
+/**
+ * How a live request is recognised as "the same question". null never merges.
+ *
+ * 🇪🇸 NOTA: era un booleano y cada tipo de solicitud lo interpretaba como
+ * `kind + origin`. Para `add-chain` eso está mal en las dos direcciones a la vez
+ * —fusiona preguntas distintas y separa preguntas iguales— así que la decisión
+ * de qué cuenta como duplicado pasa a quien crea la solicitud, que es el único
+ * que sabe qué la hace única.
+ */
+type DuplicateTest = ((candidate: PendingRequest) => boolean) | null;
 
 interface Waiter {
   resolve: (decision: ApprovedDecision) => void;
@@ -283,16 +308,13 @@ export function createApprovalCoordinator({
    * El test de la Fase 5 no lo veía porque intercalaba un `flush()` entre las
    * dos llamadas; sin él, la carrera es real.
    */
-  function claim(pending: PendingRequest, dedupe: boolean): Promise<RequestId> {
+  function claim(pending: PendingRequest, isDuplicate: DuplicateTest): Promise<RequestId> {
     return serialize(async () => {
       const all = await readAll();
 
-      if (dedupe) {
+      if (isDuplicate !== null) {
         const existing = Object.values(all).find(
-          (candidate) =>
-            candidate.kind === pending.kind &&
-            candidate.origin === pending.origin &&
-            isLive(candidate, pending.createdAt),
+          (candidate) => isLive(candidate, pending.createdAt) && isDuplicate(candidate),
         );
         if (existing !== undefined) return existing.id;
       }
@@ -305,8 +327,11 @@ export function createApprovalCoordinator({
   }
 
   /** Claims the request, shows it if it is new, and waits. Shared by every kind. */
-  async function present(pending: PendingRequest, dedupe: boolean): Promise<ApprovedDecision> {
-    const id = await claim(pending, dedupe);
+  async function present(
+    pending: PendingRequest,
+    isDuplicate: DuplicateTest,
+  ): Promise<ApprovedDecision> {
+    const id = await claim(pending, isDuplicate);
     const decision = attach(id, pending.expiresAt - pending.createdAt);
 
     // Joined an existing request: its window is already on screen.
@@ -364,7 +389,12 @@ export function createApprovalCoordinator({
      * segunda sin que el usuario la haya visto jamás. Cada firma abre su ventana
      * y se aprueba por separado. Hay un test que lo fija.
      */
-    return toAccountIndex(await present(pending, true));
+    return toAccountIndex(
+      await present(
+        pending,
+        (candidate) => candidate.kind === "connect" && candidate.origin === origin,
+      ),
+    );
   }
 
   async function requestSignature({
@@ -391,7 +421,7 @@ export function createApprovalCoordinator({
       ...(tabId === undefined ? {} : { tabId }),
     };
 
-    await present(pending, false);
+    await present(pending, null);
   }
 
   async function read(requestId: RequestId): Promise<PendingRequest | null> {
@@ -403,7 +433,51 @@ export function createApprovalCoordinator({
     return isLive(pending, now()) ? pending : null;
   }
 
-  return { requestConnect, requestSignature, settle, reject, read };
+  /**
+   * ------------------------------------------------------------------------
+   * DEDUPLICATED BY WHAT IS BEING ASKED, NOT ONLY BY WHO ASKS
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: la clave lleva `chainId` y `rpcUrl` además del origen, y las dos
+   * mitades importan por motivos distintos.
+   *
+   * Sin la URL, dos altas del mismo chainId con RPC distinto se fusionarían: el
+   * usuario vería una ventana con una URL, aprobaría, y la wallet daría por
+   * aprobada TAMBIÉN la otra. Eso no es un fallo de comodidad, es aprobar algo
+   * que nadie enseñó.
+   *
+   * Sin el origen, la ventana nombraría a un sitio y resolvería la petición de
+   * otro — consentimiento mostrado a uno y aplicado a otro, que es justo lo que
+   * el modelo por origen existe para impedir. Dos dApps pidiendo lo mismo a la
+   * vez abren dos ventanas, y ése es el precio correcto.
+   *
+   * Con los cuatro campos iguales sí es la misma pregunta, y una dApp que
+   * reintenta —o React en StrictMode— se engancha a la ventana que ya está.
+   */
+  async function requestAddChain({ origin, chain, tabId }: AddChainRequestInput): Promise<void> {
+    const at = now();
+    const timeoutMs = timeoutFor("add-chain");
+
+    const pending: PendingAddChainRequest = {
+      id: crypto.randomUUID(),
+      kind: "add-chain",
+      origin,
+      createdAt: at,
+      expiresAt: at + timeoutMs,
+      chain,
+      ...(tabId === undefined ? {} : { tabId }),
+    };
+
+    await present(
+      pending,
+      (candidate) =>
+        candidate.kind === "add-chain" &&
+        candidate.origin === origin &&
+        candidate.chain.chainId === chain.chainId &&
+        candidate.chain.rpcUrls[0] === chain.rpcUrls[0],
+    );
+  }
+
+  return { requestConnect, requestSignature, requestAddChain, settle, reject, read };
 }
 
 /**

@@ -38,8 +38,10 @@ import {
 import {
   fetchBalanceAt as defaultFetchBalanceAt,
   fetchBalances as defaultFetchBalances,
+  fetchChainId as defaultFetchChainId,
   type BalanceAtReader,
   type BalanceReader,
+  type ChainIdReader,
 } from "./chain";
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
@@ -47,7 +49,7 @@ import { appendLog, createLogEntry, redactParams } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
-import { switchChain } from "./network-rpc";
+import { addChain, switchChain } from "./network-rpc";
 import { createNetworkStore, type NetworkStore } from "./network-store";
 import { DEFAULT_CHAIN_ID } from "./networks";
 import { hasPermissionFor, type PermissionsPort } from "./permissions";
@@ -95,6 +97,8 @@ export interface DispatcherDeps {
   networks?: NetworkStore;
   /** Phase 8. Injected so the snapshot can be built without chrome.permissions. */
   permissions?: PermissionsPort;
+  /** Phase 8. Injected so adding a network is testable without a node. */
+  readChainId?: ChainIdReader;
 }
 
 /** Everything the handlers are allowed to reach. Nothing is a module global. */
@@ -108,6 +112,7 @@ interface HandlerContext {
   activeOrigin: () => Promise<Origin | null>;
   networks: NetworkStore;
   permissions: PermissionsPort;
+  readChainId: ChainIdReader;
 }
 
 /**
@@ -125,6 +130,7 @@ const noApprovalWindows = (): Promise<never> =>
 const NO_APPROVALS: ApprovalCoordinator = {
   requestConnect: noApprovalWindows,
   requestSignature: noApprovalWindows,
+  requestAddChain: noApprovalWindows,
   settle: () => Promise.resolve(),
   reject: () => Promise.resolve(),
   read: () => Promise.resolve(null),
@@ -179,6 +185,7 @@ export function createDispatcher({
   activeOrigin = () => Promise.resolve(null),
   networks = createNetworkStore(storage),
   permissions = ALL_GRANTED,
+  readChainId = defaultFetchChainId,
 }: DispatcherDeps): Dispatcher {
   const deps: HandlerContext = {
     storage,
@@ -190,6 +197,7 @@ export function createDispatcher({
     activeOrigin,
     networks,
     permissions,
+    readChainId,
   };
 
   return async function dispatch(message, sender, runtimeId) {
@@ -305,6 +313,11 @@ async function handle(
       return handleSignTypedData(deps, context, params);
     case "wallet_switchEthereumChain":
       return switchChain(deps, params, "wallet_switchEthereumChain");
+    case "wallet_addEthereumChain":
+      return addChain(deps, params, {
+        origin: context.origin,
+        ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
+      });
 
     // ---- Internal surface: extension UI only ----
     case "wallet_createMnemonic":
@@ -330,8 +343,8 @@ async function handle(
     case "wallet_reset":
       return handleReset(deps);
     default:
-      // Covers wallet_addEthereumChain, still to land in this phase, and
-      // genuine typos.
+      // Every method in the contract is implemented now. This is typos, and
+      // anything a page invents.
       throw new ProviderError(ProviderErrors.unsupportedMethod(method));
   }
 }

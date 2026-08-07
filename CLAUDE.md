@@ -178,6 +178,41 @@ Corolario: el punto común decide también **cuándo NO emitir**. Cambiar a la r
 que ya estaba activa devuelve éxito y no emite — la llamada salió bien, pero no
 ha cambiado nada que contar. Un evento que miente cuesta más que uno que falta.
 
+## Permisos de host: cuándo se revoca (aprendido en la Fase 8)
+
+> **Un permiso que el usuario concedió solo se revoca si el endpoint mintió.**
+
+Mintió significa una cosa concreta y comprobable: `eth_chainId` contra el RPC
+propuesto devuelve una cadena distinta de la declarada. Nada más.
+
+| Camino | Permiso | Respuesta |
+|---|---|---|
+| `eth_chainId` devuelve otra cadena | **revocar** | -32602 |
+| `eth_chainId` no responde | conservar | 4901 |
+| el usuario rechaza | conservar | 4001 |
+| cierra la ventana con la X | conservar | 4001 |
+| el worker muere antes de verificar | conservar | (sin respuesta) |
+
+Las cuatro filas que conservan dejan un **permiso huérfano**: un host alcanzable
+que ninguna red del catálogo usa. Se acepta, y el motivo no es que sea inofensivo
+—que lo es— sino que **la alternativa es peor**. Para recogerlos habría que
+llevar nuestra propia lista de lo que hemos pedido: estado mutable en un worker
+que muere, que es exactamente la lección de la Fase 6. Y no hay atajo por la API:
+el spike de la Fase 8 midió que `chrome.permissions.getAll()` devuelve
+`<all_urls>` por los `matches` del content script, así que **no sirve para
+enumerar lo concedido**. Que reintentar el alta funcione sin segundo diálogo es
+el consuelo, no la justificación.
+
+Revocar por un nodo que no contesta castigaría un parpadeo con el diálogo nativo
+entero otra vez, y no sabemos nada malo del endpoint: solo que ahora mismo no
+está.
+
+**La revocación del único caso que revoca se verifica.** `chrome.permissions.
+remove()` puede resolver `true` sin revocar nada — se midió en Brave durante el
+spike. Se vuelve a preguntar con `contains()`. Y si no se pudo revocar, el -32602
+se devuelve igual: no se da de alta una red que mintió solo porque no pudimos
+limpiar el permiso.
+
 ## Ediciones automatizadas: verificar que casaron
 
 Un `sed`/`python` de reemplazo que no comprueba que encontró su ancla **no es
