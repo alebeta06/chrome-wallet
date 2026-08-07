@@ -237,9 +237,44 @@ assert viejo in s, "ancla del switch"
 s = s.replace(viejo, nuevo, 1)
 ```
 
-Es la misma familia que las otras dos lecciones de este archivo: el `await`
-intermedio, el test de concurrencia que no se pone rojo, y esto. **Las tres son
-comprobaciones que parecen hechas y no lo están.**
+## Un test sobre dos instancias no prueba nada (aprendido en la Fase 8)
+
+Si el *arrange* y el *assert* operan sobre **instancias distintas**, el test pasa
+contando una historia falsa.
+
+El caso: comprobar que una firma se rechaza si la red cambia mientras la ventana
+de aprobación está abierta.
+
+```ts
+const { area } = setup(CONNECTED);                    // ← área A
+const { dispatch } = setup(CONNECTED, …, {
+  approvals: switchingApprovals(area, SEPOLIA),       // escribe en A
+});                                                   // ← lee de B
+```
+
+`setup()` crea su propia área cada vez. El cambio de red iba a un storage y el
+despachador leía otro, así que el test no ejercitaba la deriva **en absoluto** —
+y habría seguido verde con la comprobación borrada.
+
+La forma correcta es una sola instancia, con un `holder` si hace falta romper el
+orden de construcción:
+
+```ts
+const { approvals, holder } = switchingApprovals(SEPOLIA);
+const harness = setup(CONNECTED, …, { approvals });
+holder.area = harness.area;                           // la MISMA
+```
+
+> **Antes de dar por bueno un test, pregúntate sobre qué objeto opera cada
+> línea.** Dos `setup()` en un test es la señal.
+
+Y como con las otras: rómpelo a propósito y comprueba que se pone rojo.
+
+---
+
+Ésta es la cuarta de la misma familia: el `await` intermedio, el test de
+concurrencia que no se pone rojo, la edición automatizada que no casó, y ésta.
+**Las cuatro son comprobaciones que parecen hechas y no lo están.**
 
 ## Git
 

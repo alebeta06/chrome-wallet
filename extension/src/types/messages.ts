@@ -337,7 +337,27 @@ export interface TabEventMessage<E extends ProviderEventName = ProviderEventName
   type: "CODECRYPTO_TAB_EVENT";
   eventName: E;
   data: ProviderEventMap[E];
-  /** null for global-scope events, which every connected origin may receive. */
+  /**
+   * The origin this message was addressed to. The type allows null, and the
+   * emitter NEVER uses it — not even for a global event like chainChanged.
+   *
+   * 🇪🇸 NOTA: esto se aclaró en la Fase 8 porque el tipo permite las dos cosas y
+   * el comentario anterior sugería `null` para los eventos globales, que es lo
+   * contrario de lo que hace `events.ts`. La cerradura se pone SIEMPRE, y el
+   * alcance —a cuántos orígenes se emite— lo decide `eventTargets`, que es otra
+   * cosa y va por separado.
+   *
+   * El motivo es el mismo párrafo de arriba visto desde el otro lado: si una
+   * pestaña navega entre el `query` y el `sendMessage`, con `null` el evento
+   * aterriza donde sea que esté ahora — incluido un sitio NO conectado, que se
+   * enteraría de que existe una wallet y en qué red está sin haber pedido nada.
+   * Es la misma fuga que `eth_accounts` evita devolviendo `[]`, en pequeño.
+   *
+   * El precio es un falso negativo de milisegundos: una pestaña que navegue
+   * entre dos dApps conectadas justo en ese hueco puede perderse un
+   * `chainChanged` y quedarse con la red vieja hasta que recargue. Se prefiere
+   * eso a contarle algo a un desconocido.
+   */
   expectedOrigin: Origin | null;
 }
 
