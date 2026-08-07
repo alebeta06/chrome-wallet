@@ -602,6 +602,27 @@ describe("addChain", () => {
  * "no" no protege de nada y enseña a pulsar sin leer — y ese hábito se lo lleva
  * puesto después la ventana que sí importaba. Lo que NO sobra es el permiso y la
  * verificación del chainId, y eso lo comprueban los dos últimos tests.
+ *
+ * ---------------------------------------------------------------------------
+ * DÓNDE VIVE LA FALSACIÓN DE LA IDEMPOTENCIA, Y POR QUÉ NO ES AQUÍ
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: `addNetworkFromWallet` NO cortocircuita cuando la red ya existe con
+ * el mismo rpcUrl — pasa por `finaliseAdd` igual y vuelve a verificar el
+ * chainId. Si alguien le metiera el atajo, **ningún test de este bloque se
+ * pondría rojo**, y eso está comprobado. No es un hueco de cobertura: es que
+ * aquí el atajo sería inocuo, y conviene entender por qué antes de "arreglarlo".
+ *
+ * En esta ruta el permiso lo concede `network.html` en su propio botón ANTES de
+ * llamar, así que al llegar aquí ya está puesto y el atajo devolvería un
+ * catálogo correcto. En la ruta de la dApp no: allí el permiso se pide DENTRO
+ * del flujo, y el atajo cortaba antes de pedirlo — cerrando el ciclo en el que
+ * el 4902 manda a re-añadir la red y el alta no reconcede nada.
+ *
+ * Por eso la falsación de esa propiedad vive en
+ * `addChain > "recovers a revoked network through addEthereumChain"`, que sí se
+ * pone rojo al restaurar el atajo. Si algún día `network.html` dejara de pedir
+ * el permiso antes de llamar, este bloque necesitaría su propio test — y esta
+ * NOTA es el aviso.
  */
 describe("addNetworkFromWallet", () => {
   const AMOY = {

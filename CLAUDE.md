@@ -259,6 +259,53 @@ assert viejo in s, "ancla del switch"
 s = s.replace(viejo, nuevo, 1)
 ```
 
+## El límite de la cadena serializada (aprendido en la Fase 8)
+
+La cadena serializada está en tres módulos y es la herramienta por defecto contra
+las carreras de este proyecto. Por eso hace falta saber **qué no arregla**, o se
+convierte en amuleto: se pone, se da el problema por cerrado, y el que quedaba
+abierto no se busca.
+
+> **Serializar cierra el read-modify-write sobre un dato compartido. NO ordena
+> dos operaciones independientes.**
+
+El caso, del borrado de redes. Al borrar una red hay que revocar su permiso de
+host, pero solo si ninguna otra red usa el mismo patrón de origen.
+
+**Lo que la cadena SÍ cierra** — dos borrados de redes que comparten patrón,
+lanzados a la vez:
+
+```
+sin cadena:  A lee {A,B} → ve a B → conserva
+             B lee {A,B} → ve a A → conserva     ← nadie revoca, huérfano
+con cadena:  A borra → quedan {B} → ve a B → conserva
+             B borra → quedan {}  → nadie más   → revoca   ✓
+```
+
+Las dos leen y escriben **el mismo dato**, y la cadena las pone en fila. Eso es
+un read-modify-write, y es exactamente para lo que sirve.
+
+**Lo que NO cierra** — un borrado y un alta que usa ese mismo patrón:
+
+```
+borrado: no queda nadie → revoca
+alta:    (su escritura llega después) → red nueva sin permiso
+```
+
+Aquí no hay lectura-modificación-escritura compartida que ordenar: la escritura
+del alta **va después y punto**. Serializar no cambia quién llega primero, solo
+impide que se pisen. Un test que afirme "el alta concurrente conserva su permiso"
+falla **con la cadena puesta**, porque afirma algo que la cadena nunca prometió.
+
+Qué hacer con lo que queda abierto: no fingir que no está. Si el desenlace es
+**visible y reversible** —aquí la red nueva sale en `unusableChainIds` con su
+botón de reconceder— se documenta y se acepta. Lo que no vale es un comentario
+diciendo que la cadena lo cubre.
+
+> **Antes de escribir "serializado, luego seguro", pregunta si las dos
+> operaciones tocan el mismo dato.** Si no lo tocan, la cadena no tiene nada que
+> decir sobre ellas.
+
 ## Un test sobre dos instancias no prueba nada (aprendido en la Fase 8)
 
 Si el *arrange* y el *assert* operan sobre **instancias distintas**, el test pasa
