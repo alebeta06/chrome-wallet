@@ -256,6 +256,11 @@ export interface InternalRpcMap {
   /** Wallet-wide. Emits chainChanged to every connected origin. */
   wallet_setActiveNetwork: { params: [{ chainId: Hex }]; result: null };
   wallet_addNetwork: { params: [AddEthereumChainParameter]; result: NetworkConfig[] };
+  /**
+   * Removes a user-added network. Refuses a built-in and refuses the active one,
+   * and says which of the two it was.
+   */
+  wallet_removeNetwork: { params: [{ chainId: Hex }]; result: NetworkConfig[] };
   wallet_getBalances: { params: [{ addresses: Address[] }]; result: Record<Address, Hex> };
   wallet_internalTransfer: {
     params: [{ fromIndex: number; toIndex: number; valueWei: Hex }];

@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ErrorCode, type NetworkConfig, type Origin } from "@/types/messages";
 import type { EventEmitter } from "@/lib/events";
 import { ProviderError } from "@/lib/errors";
-import { addChain, switchChain } from "@/lib/network-rpc";
+import { addChain, addNetworkFromWallet, removeNetworkRpc, switchChain } from "@/lib/network-rpc";
 import type { AddChainRequestInput, ApprovalCoordinator } from "@/lib/approvals";
 import type { ChainIdReader } from "@/lib/chain";
 import { createNetworkStore, type NetworkStore } from "@/lib/network-store";
@@ -587,5 +587,291 @@ describe("addChain", () => {
     // 3. And now the advice the 4902 gave actually worked.
     await expect(switchChain(deps, [{ chainId: "0x89" }], METHOD)).resolves.toBeNull();
     expect((await networks.read()).chainId).toBe("0x89");
+  });
+});
+
+// ============================================================================
+// removeNetworkRpc
+// ============================================================================
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE WALLET'S OWN ADD: SAME CHECKS, NO APPROVAL
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: no falta una ventana, sobra. Una aprobación que no puede acabar en
+ * "no" no protege de nada y enseña a pulsar sin leer — y ese hábito se lo lleva
+ * puesto después la ventana que sí importaba. Lo que NO sobra es el permiso y la
+ * verificación del chainId, y eso lo comprueban los dos últimos tests.
+ */
+describe("addNetworkFromWallet", () => {
+  const AMOY = {
+    chainId: "0x13882" as const,
+    chainName: "Polygon Amoy",
+    rpcUrls: ["https://rpc-amoy.polygon.technology"],
+    nativeCurrency: { name: "Polygon Ecosystem Token", symbol: "POL", decimals: 18 },
+  };
+
+  function walletDeps(permissions: PermissionsPort, reports = "0x13882") {
+    return setup({ permissions }).then((base) => ({
+      ...base,
+      deps: { ...base.deps, readChainId: async () => reports },
+    }));
+  }
+
+  it("adds without any approval window", async () => {
+    const permissions = grantable("https://rpc-amoy.polygon.technology/*");
+    const { deps, networks } = await walletDeps(permissions.port);
+
+    const catalogue = await addNetworkFromWallet(deps, [AMOY]);
+
+    expect(findNetwork(catalogue, "0x13882")).toBeDefined();
+    expect(findNetwork((await networks.read()).networks, "0x13882")).toBeDefined();
+  });
+
+  /** The permission is not optional just because nobody had to approve. */
+  it("refuses when the permission was never granted", async () => {
+    const { deps, networks } = await walletDeps(grantable().port);
+
+    await expectRejection(addNetworkFromWallet(deps, [AMOY]), ErrorCode.USER_REJECTED);
+    expect(findNetwork((await networks.read()).networks, "0x13882")).toBeUndefined();
+  });
+
+  /** Neither is the verification. A lie costs the permission here too. */
+  it("revokes and refuses when the endpoint reports another chain", async () => {
+    const permissions = grantable("https://rpc-amoy.polygon.technology/*");
+    const { deps, networks } = await walletDeps(permissions.port, "0x1");
+
+    await expectRejection(addNetworkFromWallet(deps, [AMOY]), ErrorCode.INVALID_PARAMS);
+
+    expect(findNetwork((await networks.read()).networks, "0x13882")).toBeUndefined();
+    expect(permissions.holds("https://rpc-amoy.polygon.technology/*")).toBe(false);
+  });
+
+  it("refuses to repoint a built-in", async () => {
+    const permissions = grantable("https://evil.example/*");
+    const { deps } = await walletDeps(permissions.port);
+
+    await expectRejection(
+      addNetworkFromWallet(deps, [
+        { ...AMOY, chainId: SEPOLIA_CHAIN_ID, rpcUrls: ["https://evil.example"] },
+      ]),
+      ErrorCode.INVALID_PARAMS,
+    );
+  });
+});
+
+describe("removeNetworkRpc", () => {
+  const OTHER_ANVIL = toNetworkConfig(
+    {
+      chainId: "0x53a",
+      name: "Anvil Two",
+      rpcUrl: "http://localhost:8546",
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      explorerUrl: null,
+    },
+    1_000,
+  );
+
+  /** Same host as Anvil's built-in, different port — an independent grant. */
+  const SAME_PORT_AS_ANVIL = toNetworkConfig(
+    {
+      chainId: "0x53b",
+      name: "Anvil Clone",
+      rpcUrl: "http://localhost:8545",
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      explorerUrl: null,
+    },
+    1_000,
+  );
+
+  /** Same host and same pattern as POLYGON — only the path differs. */
+  const POLYGON_OTHER_PATH = toNetworkConfig(
+    {
+      chainId: "0x13882",
+      name: "Polygon Amoy",
+      rpcUrl: "https://polygon-rpc.com/amoy",
+      nativeCurrency: { name: "Polygon Ecosystem Token", symbol: "POL", decimals: 18 },
+      explorerUrl: null,
+    },
+    1_000,
+  );
+
+  describe("the three refusals reach the caller as three messages", () => {
+    it("refuses a built-in by name", async () => {
+      const { deps } = await setup();
+
+      const error = await expectRejection(
+        removeNetworkRpc(deps, [{ chainId: SEPOLIA_CHAIN_ID }]),
+        ErrorCode.INVALID_PARAMS,
+      );
+
+      expect(error.serialized.message).toContain("Sepolia");
+      expect(error.serialized.message).toContain("cannot be removed");
+    });
+
+    /** 🇪🇸 NOTA: el único con arreglo, y el único que dice qué hacer. */
+    it("refuses the active network and says how to fix it", async () => {
+      const { deps, networks } = await setup({ extra: [POLYGON] });
+      await networks.setActive(POLYGON.chainId);
+
+      const error = await expectRejection(
+        removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]),
+        ErrorCode.INVALID_PARAMS,
+      );
+
+      expect(error.serialized.message).toContain("Polygon");
+      expect(error.serialized.message).toContain("Switch to another one");
+    });
+
+    it("refuses one that is not there", async () => {
+      const { deps } = await setup();
+
+      const error = await expectRejection(
+        removeNetworkRpc(deps, [{ chainId: "0xdead" }]),
+        ErrorCode.INVALID_PARAMS,
+      );
+
+      expect(error.serialized.message).toContain("no longer in the wallet");
+    });
+
+    /** Three reasons, three different sentences. Not one generic failure. */
+    it("never gives the same message for two different reasons", async () => {
+      const { deps, networks } = await setup({ extra: [POLYGON] });
+      await networks.setActive(POLYGON.chainId);
+
+      const messages = await Promise.all(
+        [SEPOLIA_CHAIN_ID, POLYGON.chainId, "0xdead"].map(async (chainId) => {
+          const error = await expectRejection(
+            removeNetworkRpc(deps, [{ chainId }]),
+            ErrorCode.INVALID_PARAMS,
+          );
+          return error.serialized.message;
+        }),
+      );
+
+      expect(new Set(messages).size).toBe(3);
+    });
+  });
+
+  describe("the permission goes with the network, unless something else needs it", () => {
+    it("revokes the host permission of the network it removed", async () => {
+      const permissions = grantable("https://polygon-rpc.com/*");
+      const { deps } = await setup({ permissions: permissions.port, extra: [POLYGON] });
+
+      await removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]);
+
+      expect(permissions.holds("https://polygon-rpc.com/*")).toBe(false);
+    });
+
+    /**
+     * ------------------------------------------------------------------------
+     * THE PATTERN, NOT THE HOST — MEASURED IN THE PHASE 8 SPIKE
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: `localhost:8545` y `localhost:8546` son el mismo host y dos
+     * grants INDEPENDIENTES. Con la condición escrita por host, borrar la red
+     * del 8546 revocaría también el permiso de Anvil —que está en
+     * `host_permissions`— y la red de serie se volvería inalcanzable sin que
+     * nadie la hubiera tocado.
+     */
+    it("does not touch another port of the same host", async () => {
+      const permissions = grantable("http://localhost:8545/*", "http://localhost:8546/*");
+      const { deps } = await setup({ permissions: permissions.port, extra: [OTHER_ANVIL] });
+
+      await removeNetworkRpc(deps, [{ chainId: OTHER_ANVIL.chainId }]);
+
+      expect(permissions.holds("http://localhost:8546/*")).toBe(false);
+      expect(permissions.holds("http://localhost:8545/*")).toBe(true);
+    });
+
+    /** The mirror case: same pattern, so the permission has to survive. */
+    it("keeps the permission when another network shares the pattern", async () => {
+      const permissions = grantable("https://polygon-rpc.com/*");
+      const { deps } = await setup({
+        permissions: permissions.port,
+        extra: [POLYGON, POLYGON_OTHER_PATH],
+      });
+
+      await removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]);
+
+      expect(permissions.holds("https://polygon-rpc.com/*")).toBe(true);
+    });
+
+    /** Even when the survivor is a built-in that shares the exact endpoint. */
+    it("keeps the permission when a built-in shares the exact endpoint", async () => {
+      const permissions = grantable("http://localhost:8545/*");
+      const { deps } = await setup({
+        permissions: permissions.port,
+        extra: [SAME_PORT_AS_ANVIL],
+      });
+
+      await removeNetworkRpc(deps, [{ chainId: SAME_PORT_AS_ANVIL.chainId }]);
+
+      expect(permissions.holds("http://localhost:8545/*")).toBe(true);
+    });
+
+    /**
+     * 🇪🇸 NOTA: borrar es lo que el usuario pidió; revocar es aseo. No se le
+     * deshace una petición porque no supimos limpiar detrás. `remove()` puede
+     * resolver `true` sin revocar nada — se midió en Brave.
+     */
+    it("still removes the network when the revocation does not take", async () => {
+      const permissions = grantable("https://polygon-rpc.com/*");
+      permissions.breakRemove();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { deps, networks } = await setup({ permissions: permissions.port, extra: [POLYGON] });
+
+      await removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]);
+
+      expect(findNetwork((await networks.read()).networks, POLYGON.chainId)).toBeUndefined();
+      expect(permissions.holds("https://polygon-rpc.com/*")).toBe(true);
+      expect(errors).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * ---------------------------------------------------------------------------
+   * DOS BORRADOS QUE COMPARTEN PATRÓN
+   * ---------------------------------------------------------------------------
+   * 🇪🇸 NOTA: A y B usan el mismo endpoint. Se borran los dos a la vez, SIN
+   * `await` entre las llamadas, que es como salen del navegador.
+   *
+   * Con el cálculo dentro del turno serializado: el primer borrado ve que B
+   * sigue ahí y conserva el permiso; el segundo ve que ya no queda nadie y lo
+   * revoca. Neto: revocado, que es lo correcto.
+   *
+   * Con el cálculo fuera, los dos leen el mismo catálogo —el de antes de
+   * empezar—, cada uno ve al otro, y NINGUNO revoca. Queda un permiso huérfano
+   * para un endpoint que ya no usa ninguna red, y sin nada que lo delate. Este
+   * test se pone rojo al sacar el cálculo del `serialize`.
+   */
+  it("revokes exactly once when two networks sharing a pattern go at the same time", async () => {
+    const permissions = grantable("https://polygon-rpc.com/*");
+    const { deps } = await setup({
+      permissions: permissions.port,
+      extra: [POLYGON, POLYGON_OTHER_PATH],
+    });
+
+    await Promise.all([
+      removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]),
+      removeNetworkRpc(deps, [{ chainId: POLYGON_OTHER_PATH.chainId }]),
+    ]);
+
+    expect(permissions.holds("https://polygon-rpc.com/*")).toBe(false);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el complemento del anterior. Se borra uno de los dos y el permiso
+   * tiene que sobrevivir — sin la serialización esto pasaría igual, así que no
+   * prueba la cadena; prueba que el conteo mira el catálogo DESPUÉS del borrado
+   * y no antes. Con `remaining` calculado antes, el propio borrado se contaría a
+   * sí mismo y el permiso no se revocaría nunca.
+   */
+  it("counts the catalogue after the removal, not before", async () => {
+    const permissions = grantable("https://polygon-rpc.com/*");
+    const { deps } = await setup({ permissions: permissions.port, extra: [POLYGON] });
+
+    await removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]);
+
+    expect(permissions.holds("https://polygon-rpc.com/*")).toBe(false);
   });
 });

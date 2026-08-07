@@ -28,17 +28,27 @@ import {
   isBuiltIn,
   toNetworkConfig,
   type NetworkDraft,
+  type RemovalRefusal,
 } from "./networks";
-import { hasPermissionFor, isRpcUrlAllowed, revoke, type PermissionsPort } from "./permissions";
+import {
+  hasPermissionFor,
+  isRpcUrlAllowed,
+  originPatternFromRpcUrl,
+  revoke,
+  type PermissionsPort,
+} from "./permissions";
 
 export interface SwitchChainDeps {
   networks: NetworkStore;
   permissions: PermissionsPort;
 }
 
-export interface AddChainDeps extends SwitchChainDeps {
-  approvals: ApprovalCoordinator;
+export interface FinaliseDeps extends SwitchChainDeps {
   readChainId: ChainIdReader;
+}
+
+export interface AddChainDeps extends FinaliseDeps {
+  approvals: ApprovalCoordinator;
 }
 
 /**
@@ -296,12 +306,35 @@ export async function addChain(
     ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
   });
 
+  await finaliseAdd({ networks, permissions, readChainId }, draft);
+  return null;
+}
+
+/**
+ * Everything that has to be true before a network is stored, whoever asked.
+ *
+ * ---------------------------------------------------------------------------
+ * WHO ASKS BRANCHES. WHAT IS VERIFIED DOES NOT
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: hay dos entradas para dar de alta una red —una dApp pidiéndolo, y el
+ * usuario haciéndolo desde la propia wallet— y solo una de las dos necesita
+ * ventana de aprobación. Lo que NO se bifurca es esto: que el permiso esté
+ * concedido, que el endpoint demuestre qué cadena sirve, y que se le revoque el
+ * permiso si mintió. Las dos rutas terminan aquí.
+ *
+ * Duplicar estas veinte líneas sería la vía rápida a que una de las dos se salte
+ * la verificación, y la que se la saltaría es justo la que no abre ventana.
+ */
+export async function finaliseAdd(
+  { networks, permissions, readChainId }: FinaliseDeps,
+  draft: NetworkDraft,
+): Promise<NetworkConfig> {
   /**
-   * 🇪🇸 NOTA: se vuelve a preguntar por el permiso aunque la ventana solo
-   * aprueba después de conseguirlo. Es la única fuente que el spike de la Fase 8
-   * demostró fiable, y entre la concesión y este punto ha habido un salto de
-   * proceso. Si faltara, seguir adelante significaría llamar al RPC sin permiso
-   * y devolver un 4901 que culparía al nodo de algo nuestro.
+   * 🇪🇸 NOTA: se pregunta por el permiso aunque quien llama crea tenerlo. Es la
+   * única fuente que el spike de la Fase 8 demostró fiable, y entre la concesión
+   * y este punto ha habido un salto de proceso — de la ventana al worker. Si
+   * faltara, seguir adelante sería llamar al RPC sin permiso y devolver un 4901
+   * que culparía al nodo de un problema nuestro.
    */
   if (!(await hasPermissionFor(permissions, draft.rpcUrl))) {
     throw new ProviderError(
@@ -337,7 +370,45 @@ export async function addChain(
    * secundario de un alta movería al usuario a una cadena recién aprobada sin
    * que lo haya pedido.
    */
-  return null;
+  return candidate;
+}
+
+/**
+ * The wallet's own add: same verification, no approval window.
+ *
+ * ---------------------------------------------------------------------------
+ * THE OWNER OF THE WALLET DOES NOT APPROVE THEMSELVES
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: no falta una ventana aquí, sobra. Cuando quien pide es una dApp, la
+ * ventana existe para nombrar a un tercero y darle al usuario la opción de decir
+ * que no. Cuando quien pide es el usuario desde la UI de la wallet no hay
+ * tercero, no hay nada que él no sepa ya, y la respuesta es sí por construcción.
+ *
+ * Y una aprobación que no puede acabar en "no" no es gratis: enseña a pulsar sin
+ * leer, y ese hábito se lo lleva puesto después la ventana que sí importaba.
+ *
+ * Lo que NO sobra —el permiso de Chrome, que necesita un gesto de usuario, y la
+ * verificación del chainId— sigue estando: el permiso lo pide `network.html` en
+ * su propio botón, y la verificación es `finaliseAdd`.
+ */
+export async function addNetworkFromWallet(
+  deps: FinaliseDeps,
+  params: unknown[],
+): Promise<NetworkConfig[]> {
+  const draft = parseAddChainParams(params);
+  const { networks: catalogue } = await deps.networks.read();
+
+  const existing = findNetwork(catalogue, draft.chainId);
+  if (isBuiltIn(draft.chainId) && existing !== undefined) {
+    if (existing.rpcUrl === draft.rpcUrl) return catalogue;
+
+    throw invalidParams(
+      `"${existing.name}" is built into CodeCrypto Wallet and its RPC endpoint cannot be changed.`,
+    );
+  }
+
+  await finaliseAdd(deps, draft);
+  return (await deps.networks.read()).networks;
 }
 
 /**
@@ -361,4 +432,88 @@ async function revokeAfterLie(
   if (!(await revoke(permissions, draft.rpcUrl))) {
     console.error(`[codecrypto] could not revoke the host permission for ${draft.rpcUrl}`);
   }
+}
+
+// ============================================================================
+// wallet_removeNetwork
+// ============================================================================
+
+/**
+ * 🇪🇸 NOTA: los tres motivos llegan a la UI como tres mensajes, no como un
+ * "no se pudo borrar" genérico. Cada uno es una situación distinta para el
+ * usuario, y solo uno de ellos tiene arreglo — por eso es el único que dice qué
+ * hacer. Mismo criterio que el 4902 del permiso revocado: un mensaje que
+ * describe el problema sin dar salida es un callejón.
+ */
+function explainRefusal(reason: RemovalRefusal, chainId: Hex, name: string | undefined): string {
+  switch (reason) {
+    case "built-in":
+      return `"${name ?? chainId}" comes with CodeCrypto Wallet and cannot be removed.`;
+    case "active":
+      return (
+        `"${name ?? chainId}" is the network you are on. Switch to another one before ` +
+        "removing it."
+      );
+    case "not-found":
+      return `That network is no longer in the wallet.`;
+  }
+}
+
+/**
+ * Removes a user network, and takes its host permission with it — but only if
+ * nothing else needs it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE CONDITION IS THE PATTERN, NOT THE HOST
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: el spike de la Fase 8 midió que Chrome guarda el puerto DENTRO del
+ * permiso, así que la comparación tiene que ser por patrón de origen completo.
+ * Por host se equivocaría en las dos direcciones:
+ *
+ *   localhost:8545 y localhost:8546   mismo host, patrones distintos
+ *       → borrar una NO puede revocar la otra: son grants independientes, y
+ *         hacerlo dejaría la otra red inalcanzable sin que nadie la tocara.
+ *
+ *   https://x.com/a y https://x.com/b  mismo host Y mismo patrón (la ruta no
+ *       → borrar una NO debe revocar nada       cuenta en un match pattern)
+ *
+ * Comparar patrones acierta en los dos casos con una sola regla.
+ *
+ * Y el cálculo va DENTRO del turno serializado del borrado, por el callback. Eso
+ * garantiza que se cuenta contra el catálogo ya sin la red, y que dos borrados
+ * que comparten patrón vean el efecto del otro en vez de esperarse mutuamente y
+ * no revocar ninguno. Ver la NOTA de `remove` en `network-store.ts`, que también
+ * dice lo que esto NO cierra.
+ */
+export async function removeNetworkRpc(
+  { networks, permissions }: SwitchChainDeps,
+  params: unknown[],
+): Promise<NetworkConfig[]> {
+  const chainId = parseChainIdParam(params, "wallet_removeNetwork");
+  const before = await networks.read();
+  const doomed = findNetwork(before.networks, chainId);
+
+  const result = await networks.remove(chainId, async (removed, remaining) => {
+    const pattern = originPatternFromRpcUrl(removed.rpcUrl);
+    if (pattern === null) return;
+
+    const stillUsed = remaining.some(
+      (entry) => originPatternFromRpcUrl(entry.rpcUrl) === pattern,
+    );
+    if (stillUsed) return;
+
+    /**
+     * 🇪🇸 NOTA: si la revocación no toma —`remove()` puede resolver `true` sin
+     * revocar nada, se midió en Brave— la red se queda borrada IGUAL. Borrar es
+     * lo que el usuario pidió; revocar es aseo, y no se le deshace una petición
+     * porque no supimos limpiar detrás. Queda el aviso en la consola del worker.
+     */
+    if (!(await revoke(permissions, removed.rpcUrl))) {
+      console.error(`[codecrypto] removed ${removed.name} but could not revoke ${pattern}`);
+    }
+  });
+
+  if (!result.ok) throw invalidParams(explainRefusal(result.reason, chainId, doomed?.name));
+
+  return result.networks;
 }

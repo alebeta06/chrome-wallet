@@ -1898,6 +1898,149 @@ describe("a pending approval whose chain moved", () => {
   });
 });
 
+/**
+ * ---------------------------------------------------------------------------
+ * EL CICLO DE RECONCESIÓN, ENTERO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: esto camina exactamente lo que hace el usuario en el popup cuando su
+ * red aparece marcada como "no access" y pulsa Restaurar. Lo que falta aquí es
+ * el DOM —no hay jsdom en este proyecto— y el `chrome.permissions.request()`,
+ * que es un diálogo nativo y no se puede automatizar; eso queda en las
+ * comprobaciones manuales y en `docs/e2e-backlog.md`.
+ *
+ * Lo que sí cubre es la cadena de llamadas al background, que es todo lo que la
+ * UI hace: si esta secuencia funciona, el botón no puede llevar a un callejón.
+ * Y el paso 4 es el que importa — el alta con los MISMOS parámetros tiene que
+ * volver a dejar la red usable, no cortocircuitar a `null`.
+ */
+describe("restoring a revoked network, end to end", () => {
+  const AMOY = {
+    chainId: "0x13882",
+    chainName: "Polygon Amoy",
+    rpcUrls: ["https://rpc-amoy.polygon.technology"],
+    nativeCurrency: { name: "Polygon Ecosystem Token", symbol: "POL", decimals: 18 },
+  };
+  const AMOY_PATTERN = "https://rpc-amoy.polygon.technology/*";
+
+  /**
+   * Grants a test can take away mid-scenario, like chrome://extensions does.
+   *
+   * 🇪🇸 NOTA: arranca con los patrones de las DOS builtin puestos. Están en
+   * `host_permissions` del manifest, y la comprobación manual 57 midió en Chrome
+   * que eso implica `contains() === true`. Sin ellos el fixture mentiría:
+   * `unusableChainIds` saldría con Anvil y Sepolia dentro en un escenario donde
+   * el usuario no ha tocado nada.
+   */
+  const BUILT_IN_PATTERNS = ["http://localhost:8545/*", "https://sepolia.drpc.org/*"];
+
+  function grants(...initial: string[]) {
+    const held = new Set([...BUILT_IN_PATTERNS, ...initial]);
+    return {
+      port: {
+        contains: (pattern: string) => Promise.resolve(held.has(pattern)),
+        remove: (pattern: string) => {
+          held.delete(pattern);
+          return Promise.resolve(true);
+        },
+      } satisfies PermissionsPort,
+      revoke: (pattern: string) => held.delete(pattern),
+      grant: (pattern: string) => held.add(pattern),
+    };
+  }
+
+  it("walks revoke -> marked unusable -> restore -> usable again", async () => {
+    const permissions = grants(AMOY_PATTERN);
+    const { dispatch } = setup(LOADED_WALLET, undefined, undefined, {
+      permissions: permissions.port,
+      readChainId: async () => "0x13882",
+    });
+
+    const state = async (): Promise<WalletSnapshot> =>
+      expectResult<WalletSnapshot>(
+        await dispatch(request("wallet_getState"), uiSender(), RUNTIME_ID),
+      );
+
+    // 1. The network is added and usable.
+    await dispatch(request("wallet_addNetwork", [AMOY]), uiSender(), RUNTIME_ID);
+    expect((await state()).unusableChainIds).toEqual([]);
+
+    // 2. The user revokes the host from chrome://extensions.
+    permissions.revoke(AMOY_PATTERN);
+
+    // 3. The popup marks it — the network stays in the list, it is not hidden.
+    const revoked = await state();
+    expect(revoked.unusableChainIds).toEqual(["0x13882"]);
+    expect(revoked.networks.map((entry) => entry.chainId)).toContain("0x13882");
+
+    // 3b. And picking it in the selector explains itself instead of failing flat.
+    const refused = await dispatch(
+      request("wallet_setActiveNetwork", [{ chainId: "0x13882" }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+    expectError(refused, ErrorCode.UNRECOGNIZED_CHAIN);
+    if (!refused.ok) expect(refused.error.message).toContain("revoked");
+
+    // 4. "Restore" seeds the form from the stored network and re-adds it. The
+    //    window grants the permission; here the test does.
+    permissions.grant(AMOY_PATTERN);
+    const restored = await dispatch(request("wallet_addNetwork", [AMOY]), uiSender(), RUNTIME_ID);
+    expect(restored.ok).toBe(true);
+
+    // 5. Usable again, and now selecting it works.
+    expect((await state()).unusableChainIds).toEqual([]);
+    const switched = await dispatch(
+      request("wallet_setActiveNetwork", [{ chainId: "0x13882" }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+    expect(switched.ok).toBe(true);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el complemento. Borrar la red desde el popup se lleva su permiso —
+   * el usuario lo pidió— y los tres motivos de rechazo llegan como tres frases
+   * distintas, no como un "no se pudo borrar".
+   */
+  it("removes a user network and refuses the built-ins by name", async () => {
+    const permissions = grants(AMOY_PATTERN);
+    const { dispatch } = setup(LOADED_WALLET, undefined, undefined, {
+      permissions: permissions.port,
+      readChainId: async () => "0x13882",
+    });
+
+    await dispatch(request("wallet_addNetwork", [AMOY]), uiSender(), RUNTIME_ID);
+
+    const removed = await dispatch(
+      request("wallet_removeNetwork", [{ chainId: "0x13882" }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+    expect(removed.ok).toBe(true);
+
+    const refused = await dispatch(
+      request("wallet_removeNetwork", [{ chainId: ANVIL_CHAIN_ID }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+    expectError(refused, ErrorCode.INVALID_PARAMS);
+    if (!refused.ok) expect(refused.error.message).toContain("Anvil Local");
+  });
+
+  it("refuses wallet_removeNetwork from a web page", async () => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    expectError(
+      await dispatch(
+        request("wallet_removeNetwork", [{ chainId: ANVIL_CHAIN_ID }]),
+        pageSender(),
+        RUNTIME_ID,
+      ),
+      ErrorCode.UNAUTHORIZED,
+    );
+  });
+});
+
 describe("switching the network", () => {
   /**
    * 🇪🇸 NOTA: los dos métodos comparten handler porque el efecto es idéntico, y

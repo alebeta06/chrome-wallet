@@ -49,7 +49,7 @@ import { appendLog, createLogEntry, redactParams } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
-import { addChain, switchChain } from "./network-rpc";
+import { addChain, addNetworkFromWallet, removeNetworkRpc, switchChain } from "./network-rpc";
 import { createNetworkStore, type NetworkStore } from "./network-store";
 import { DEFAULT_CHAIN_ID } from "./networks";
 import { hasPermissionFor, type PermissionsPort } from "./permissions";
@@ -334,6 +334,10 @@ async function handle(
       return handleSetSiteAccount(deps, params);
     case "wallet_setActiveNetwork":
       return switchChain(deps, params, "wallet_setActiveNetwork");
+    case "wallet_addNetwork":
+      return addNetworkFromWallet(deps, params);
+    case "wallet_removeNetwork":
+      return removeNetworkRpc(deps, params);
     case "wallet_getConnectedSites":
       return handleGetConnectedSites(storage);
     case "wallet_disconnectSite":

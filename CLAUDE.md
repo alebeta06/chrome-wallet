@@ -180,18 +180,40 @@ ha cambiado nada que contar. Un evento que miente cuesta más que uno que falta.
 
 ## Permisos de host: cuándo se revoca (aprendido en la Fase 8)
 
-> **Un permiso que el usuario concedió solo se revoca si el endpoint mintió.**
+> **La wallet solo revoca por su cuenta si el endpoint mintió. Aparte de eso,
+> revoca cuando el usuario se lo pide: borrar la última red que usaba un patrón
+> ES la petición.**
 
-Mintió significa una cosa concreta y comprobable: `eth_chainId` contra el RPC
+El eje es **quién decide**, no qué ha pasado. Sin eso la tabla parece seis reglas
+sueltas y son dos:
+
+- las filas de *conservar* son casos en los que la wallet estaría decidiendo sola
+  y sin justificación;
+- las de *revocar* son la única en que tiene justificación (mintió) y la única en
+  que no está decidiendo ella (el usuario borró la red).
+
+"Mintió" significa una cosa concreta y comprobable: `eth_chainId` contra el RPC
 propuesto devuelve una cadena distinta de la declarada. Nada más.
 
 | Camino | Permiso | Respuesta |
 |---|---|---|
 | `eth_chainId` devuelve otra cadena | **revocar** | -32602 |
+| el usuario borra la red que lo usaba | **revocar** † | — |
 | `eth_chainId` no responde | conservar | 4901 |
 | el usuario rechaza | conservar | 4001 |
 | cierra la ventana con la X | conservar | 4001 |
 | el worker muere antes de verificar | conservar | (sin respuesta) |
+
+† **Solo si ninguna otra red del catálogo tiene el MISMO PATRÓN de origen** — no
+el mismo host — y calculado **dentro del mismo turno serializado** que el
+borrado, o un alta concurrente del mismo patrón se queda sin permiso entre el
+cálculo y la revocación.
+
+Por patrón y no por host porque el spike de la Fase 8 midió que Chrome guarda el
+puerto dentro del permiso: `localhost:8545` y `localhost:8546` son **grants
+independientes**, así que borrar la red de uno no puede tocar la del otro. Y al
+revés, `https://x.com/a` y `https://x.com/b` comparten patrón —la ruta no cuenta—
+así que borrar una no puede revocarle el permiso a la otra.
 
 Las cuatro filas que conservan dejan un **permiso huérfano**: un host alcanzable
 que ninguna red del catálogo usa. Se acepta, y el motivo no es que sea inofensivo

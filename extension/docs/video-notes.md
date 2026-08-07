@@ -71,3 +71,38 @@ y dejaría dos URLs completamente distintas viéndose idénticas en pantalla.
 > En una dirección importa el principio; en un dominio importa el final. Aplicar
 > el mismo formateador a los dos porque "los dos son cadenas largas" convierte un
 > control de seguridad en decoración.
+
+### El dueño de la wallet no se aprueba a sí mismo
+
+`src/ui/network/` frente a `src/ui/notification/AddChainPrompt.tsx`
+
+Añadir una red tiene dos entradas: una dApp pidiéndolo, y el usuario haciéndolo
+desde la propia wallet. La tentación es que las dos pasen por la misma ventana de
+aprobación — un solo camino, menos código, y suena a más seguro.
+
+Es al revés. El usuario teclea cinco campos, pulsa "Add network", y le aparece
+una ventana preguntándole si aprueba lo que acaba de escribir. Eso no protege de
+nada: no hay tercero a quien nombrar, no hay nada que él no sepa ya, y la
+respuesta es sí por construcción.
+
+Lo que sí hace es **gastar la moneda**. Cada ventana de aprobación que aparece
+para algo inevitable enseña a pulsar sin leer, y ese hábito se lo lleva puesto
+después la ventana que sí importaba — la de una dApp pidiendo firmar algo.
+
+> **Una aprobación que no puede acabar en "no" no es una aprobación: es un paso
+> más.** Y devalúa a las que sí lo son.
+
+Lo que se bifurca es **quién pregunta**. Lo que se verifica no:
+
+```
+finaliseAdd()          ← permiso concedido, eth_chainId comprobado,
+   ↑         ↑            revocar si mintió, persistir
+addChain   addNetworkFromWallet
+ (dApp)      (nuestra UI)
+   ↑            ↑
+ APRUEBA     no aprueba
+```
+
+El permiso de Chrome y la verificación del chainId son obligatorios en los dos
+caminos, y viven en un solo sitio. La aprobación es lo único que sobra cuando el
+que pide es el dueño.

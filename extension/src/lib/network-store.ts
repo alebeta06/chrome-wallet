@@ -41,6 +41,18 @@ import {
 } from "./networks";
 import type { WalletStorage } from "./storage";
 
+/**
+ * Cleanup that has to happen with the removal, not after it.
+ *
+ * 🇪🇸 NOTA: se inyecta en vez de importar `permissions.ts` aquí, por la misma
+ * razón que el predicado de `fallbackIfUnusable`: este módulo no sabe nada de
+ * `chrome.*` y así el caso entero se prueba sin navegador.
+ */
+export type AfterRemoval = (
+  removed: NetworkConfig,
+  remaining: NetworkConfig[],
+) => Promise<void>;
+
 export interface Catalogue {
   networks: NetworkConfig[];
   chainId: Hex;
@@ -57,8 +69,13 @@ export interface NetworkStore {
   setActive(chainId: Hex): Promise<boolean>;
   /** Adds or overwrites a user network. Built-ins are left untouched. */
   upsert(entry: NetworkConfig): Promise<NetworkConfig[]>;
-  /** Removes a user network, or explains why it would not. */
-  remove(chainId: Hex): Promise<RemovalResult>;
+  /**
+   * Removes a user network, or explains why it would not.
+   *
+   * `afterRemoval` runs INSIDE the serialized turn, with the entry that went and
+   * the catalogue that is left. See the note on the implementation.
+   */
+  remove(chainId: Hex, afterRemoval?: AfterRemoval): Promise<RemovalResult>;
   /**
    * Moves off the active network if it is no longer usable. Resolves with the
    * new chain id, or null when nothing moved.
@@ -229,12 +246,50 @@ export function createNetworkStore(
      * catálogo completo y el segundo reescribe la red que el primero acababa de
      * quitar — que vuelve a aparecer sola.
      */
-    remove(chainId: Hex): Promise<RemovalResult> {
+    /**
+     * ------------------------------------------------------------------------
+     * THE CLEANUP RUNS INSIDE THE TURN, AND THAT IS THE WHOLE POINT
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: al borrar una red hay que revocar su permiso de host, pero solo
+     * si ninguna OTRA red del catálogo usa el mismo patrón de origen. Ese
+     * cálculo y la revocación tienen que ir en el mismo turno serializado que el
+     * borrado.
+     *
+     * Lo que cierra: que el conteo se haga contra el catálogo YA sin la red
+     * borrada, y que dos borrados simultáneos vean el efecto del otro. Sin esto,
+     * dos redes que comparten patrón borradas a la vez leen ambas el catálogo de
+     * antes, cada una ve a la otra, y NINGUNA revoca — permiso huérfano y nada
+     * que lo delate. Hay un test que se pone rojo si el conteo sale del turno.
+     *
+     * Lo que NO cierra, y conviene tenerlo escrito: un alta que aterrice DESPUÉS
+     * de la revocación. Eso no es un read-modify-write, es orden entre dos
+     * operaciones independientes, y serializar no lo arregla — la escritura del
+     * alta va después y punto. El desenlace ahí es visible y reversible: la red
+     * nueva aparece en `unusableChainIds` con su botón de reconceder, que es el
+     * camino del bloque D. No es silencioso, que es la diferencia que importa.
+     */
+
+    remove(chainId: Hex, afterRemoval?: AfterRemoval): Promise<RemovalResult> {
       return serialize(async () => {
         const current = await read();
         const result = removeNetwork(current.networks, chainId, current.chainId);
+        if (!result.ok) return result;
 
-        if (result.ok) await persist({ networks: result.networks, chainId: current.chainId });
+        const removed = findNetwork(current.networks, chainId);
+
+        /**
+         * 🇪🇸 NOTA: se persiste ANTES de limpiar. Borrar es lo que el usuario
+         * pidió; revocar es aseo. Si la revocación falla —y `remove()` puede
+         * fallar, se midió en Brave— la red se queda borrada igual y el fallo
+         * queda en la consola del worker. Al revés dejaríamos al usuario con una
+         * red que sigue ahí porque no supimos limpiar detrás.
+         */
+        await persist({ networks: result.networks, chainId: current.chainId });
+
+        if (removed !== undefined && afterRemoval !== undefined) {
+          await afterRemoval(removed, result.networks);
+        }
+
         return result;
       });
     },
