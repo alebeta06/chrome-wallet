@@ -1065,6 +1065,16 @@ solo se pide al abrir el popup y después de una acción.
 > lo que dura el popup abierto e invalidarlo con `permissions.onAdded` /
 > `onRemoved`. Por debajo, no.
 
+**Medido** (Chrome, perfil limpio, 5 de agosto de 2026): **0.409 ms** de media
+por `contains()`. Con las dos redes de serie y las llamadas en paralelo son
+~0.8 ms al abrir el popup.
+
+**Veredicto: no se cachea.** Sin caché no hay invalidación que mantener, y es
+una pieza menos de estado mutable en un worker que muere cuando le apetece. El
+umbral de 1 ms se queda escrito: si un día el catálogo crece mucho o Chrome
+cambia el coste, vuelve a correr el snippet y compara contra este número en vez
+de contra una intuición.
+
 ## 57. Las builtin salen usables en un perfil normal
 
 ```js
@@ -1076,6 +1086,17 @@ await chrome.runtime.sendMessage({
 
 Esperado: **`[]`**. Anvil y Sepolia están en `host_permissions`, así que deberían
 estar siempre concedidas.
+
+**Medido** (Chrome, perfil limpio, 5 de agosto de 2026):
+
+```
+anvil: true | sepolia: true      →  unusableChainIds: []
+```
+
+Los `host_permissions` declarados **sí** implican `contains() === true`. La
+suposición se sostiene, así que `unusableChainIds` no necesita distinguir
+"retirado por site access" de "revocado", y el listener de `onRemoved` puede
+tratar los dos casos igual.
 
 > Esta comprobación existe porque esa suposición podría ser falsa. Chrome deja
 > restringir el acceso a sitios de una extensión desde su tarjeta ("On click" /
@@ -1109,3 +1130,67 @@ Con Anvil activo, revoca el host de Sepolia.
 Esperado: `unusableChainIds` incluye `0xaa36a7`, la red **sigue** en `networks`,
 y **no** se emite `chainChanged`. Una red no usable no es una red borrada, y
 revocar algo que no estabas usando no te mueve de sitio.
+
+## 60. Cambiar de red desde una dApp
+
+Con la dApp conectada y su consola abierta:
+
+```js
+const p = await window.codecrypto ?? provider   // el que ya usas en la dApp
+provider.on('chainChanged', (id) => console.log('chainChanged →', id))
+
+await provider.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0xaa36a7' }],
+})
+```
+
+Esperado: devuelve `null`, se imprime `chainChanged → 0xaa36a7`, y
+`eth_chainId` ya responde lo nuevo. El popup enseña Sepolia al abrirlo.
+
+**Y NO se imprime `accountsChanged`.** Cambiar de red no toca las cuentas ni los
+permisos por origen: son ejes independientes. Ponle también un listener a
+`accountsChanged` antes de la llamada para poder afirmarlo, no para suponerlo.
+
+## 61. Los dos 4902, y son distintos
+
+```js
+// a) una red que no está en el catálogo
+await provider.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0x1' }],
+}).catch((e) => console.log(e.code, e.message))
+```
+
+Esperado: **4902**, y el mensaje menciona `wallet_addEthereumChain`.
+
+```js
+// b) una red que SÍ está, con el permiso revocado
+// primero quita sepolia.drpc.org en chrome://extensions → Site access
+await provider.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0xaa36a7' }],
+}).catch((e) => console.log(e.code, e.message))
+```
+
+Esperado: **4902 también**, pero el mensaje dice *"Sepolia"* y *"revoked"*. Mismo
+código porque la reacción correcta de la dApp es la misma —ofrecer añadirla—, y
+distinto mensaje porque lo que el usuario tiene que entender no lo es.
+
+Comprueba además que **la red activa no se movió** y que no llegó ningún
+`chainChanged`: el permiso se comprueba antes de escribir.
+
+## 62. Escrito de otra forma es la misma red
+
+```js
+await provider.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0x0AA36A7' }],
+})
+await provider.request({ method: 'eth_chainId' })
+```
+
+Esperado: funciona, y `eth_chainId` devuelve `"0xaa36a7"` — en minúsculas y sin
+el cero. Un `0x01` no es una petición rara: es el mismo número escrito de otra
+forma, y obligar a la dApp a conocer nuestra forma canónica sería un detalle
+nuestro filtrándose hacia fuera.

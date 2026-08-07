@@ -245,12 +245,16 @@ describe("the trust boundary", () => {
    * 🇪🇸 NOTA: este test usaba `eth_accounts`, que en la Fase 3 ya está
    * implementado; luego a `eth_requestAccounts` (Fase 5), `eth_sendTransaction`
    * (Fase 6) y `eth_signTypedData_v4` (Fase 7). Ahora vive en
-   * `wallet_switchEthereumChain`, que llega en la Fase 8 y es de los últimos
-   * sitios donde puede vivir. Lo que comprueba no es el método concreto: es que
-   * la puerta y la implementación son dos cosas distintas. Un método público sin implementar tiene que dar 4200
-   * (pasó el control de emisor y cayó por el `default`), no 4100. Si algún día
-   * diera 4100, sería que la frontera está rechazando métodos públicos y ninguna
-   * dApp podría hablar con la wallet.
+   * `wallet_switchEthereumChain` (Fase 8, esta misma). Ahora vive en
+   * `wallet_addEthereumChain`, que es el ÚLTIMO método público sin implementar
+   * del contrato: cuando aterrice, este test se queda sin sitio al que mudarse y
+   * habrá que borrarlo.
+   *
+   * Lo que comprueba no es el método concreto: es que la puerta y la
+   * implementación son dos cosas distintas. Un método público sin implementar
+   * tiene que dar 4200 —pasó el control de emisor y cayó por el `default`—, no
+   * 4100. Si algún día diera 4100, sería que la frontera está rechazando métodos
+   * públicos y ninguna dApp podría hablar con la wallet.
    *
    * Que este test tenga que mudarse cada dos fases es buena señal: significa que
    * la superficie pública se va implementando.
@@ -259,7 +263,7 @@ describe("the trust boundary", () => {
     const { dispatch } = setup();
 
     expectError(
-      await dispatch(request("wallet_switchEthereumChain"), pageSender(), RUNTIME_ID),
+      await dispatch(request("wallet_addEthereumChain"), pageSender(), RUNTIME_ID),
       ErrorCode.UNSUPPORTED_METHOD,
     );
   });
@@ -1212,14 +1216,22 @@ describe("the activity log", () => {
     expect(logsIn(area)).toEqual([]);
   });
 
+  /**
+   * 🇪🇸 NOTA: se usa una llamada malformada y no un método sin implementar. Lo
+   * que se prueba aquí es el REGISTRO —que una llamada fallida deja las dos
+   * entradas—, y colgarlo de "un método que todavía no existe" ataba el test al
+   * calendario de las fases: cada vez que se implementaba uno, este test se caía
+   * por un motivo que no tiene nada que ver con lo que comprueba. Un param
+   * inválido falla igual hoy y dentro de tres fases.
+   */
   it("records the call and then the error when a call fails", async () => {
     const { area, dispatch } = setup(LOADED_WALLET);
 
-    await dispatch(request("wallet_switchEthereumChain"), pageSender(), RUNTIME_ID);
+    await dispatch(request("eth_getBalance", ["0xnothex"]), pageSender(), RUNTIME_ID);
 
     const entries = logsIn(area);
     expect(entries.map((entry) => entry.level)).toEqual(["call", "error"]);
-    expect(entries[1].detail).toMatchObject({ code: ErrorCode.UNSUPPORTED_METHOD });
+    expect(entries[1].detail).toMatchObject({ code: ErrorCode.INVALID_PARAMS });
   });
 
   it("keeps the params of a harmless public call", async () => {
@@ -1748,6 +1760,73 @@ describe("wallet_reset with connected sites", () => {
  * el permiso desde `chrome://extensions`, y no hay ningún evento que nos avise
  * justo cuando el popup se abre.
  */
+describe("switching the network", () => {
+  /**
+   * 🇪🇸 NOTA: los dos métodos comparten handler porque el efecto es idéntico, y
+   * lo único que los separa —quién puede pedirlo— lo resuelve
+   * `assertSenderMayCall` una capa antes. Estos dos tests fijan esa frontera:
+   * una web puede pedir el cambio, pero solo por la puerta pública.
+   */
+  it("lets a dApp call wallet_switchEthereumChain", async () => {
+    const { dispatch, area } = setup(LOADED_WALLET);
+
+    const response = await dispatch(
+      request("wallet_switchEthereumChain", [{ chainId: SEPOLIA_CHAIN_ID }]),
+      pageSender(),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(true);
+    expect(area.snapshot()["cc:chainId"]).toBe(SEPOLIA_CHAIN_ID);
+  });
+
+  it("refuses wallet_setActiveNetwork from a web page with 4100", async () => {
+    const { dispatch, area } = setup(LOADED_WALLET);
+
+    expectError(
+      await dispatch(
+        request("wallet_setActiveNetwork", [{ chainId: SEPOLIA_CHAIN_ID }]),
+        pageSender(),
+        RUNTIME_ID,
+      ),
+      ErrorCode.UNAUTHORIZED,
+    );
+    expect(area.snapshot()["cc:chainId"]).not.toBe(SEPOLIA_CHAIN_ID);
+  });
+
+  it("lets the popup call wallet_setActiveNetwork", async () => {
+    const { dispatch, area } = setup(LOADED_WALLET);
+
+    const response = await dispatch(
+      request("wallet_setActiveNetwork", [{ chainId: SEPOLIA_CHAIN_ID }]),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(true);
+    expect(area.snapshot()["cc:chainId"]).toBe(SEPOLIA_CHAIN_ID);
+  });
+
+  /**
+   * 🇪🇸 NOTA: `eth_chainId` tiene que devolver lo nuevo inmediatamente después.
+   * Una dApp que reacciona al `chainChanged` preguntando la red se encontraría
+   * el valor viejo si la emisión saliera antes de persistir.
+   */
+  it("reports the new chain right after switching", async () => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    await dispatch(
+      request("wallet_switchEthereumChain", [{ chainId: SEPOLIA_CHAIN_ID }]),
+      pageSender(),
+      RUNTIME_ID,
+    );
+
+    expect(
+      expectResult<string>(await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID)),
+    ).toBe(SEPOLIA_CHAIN_ID);
+  });
+});
+
 describe("WalletSnapshot.unusableChainIds", () => {
   /** A port that grants everything except the patterns it is told to deny. */
   function denying(...denied: string[]): PermissionsPort {

@@ -47,6 +47,7 @@ import { appendLog, createLogEntry, redactParams } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
+import { switchChain } from "./network-rpc";
 import { createNetworkStore, type NetworkStore } from "./network-store";
 import { DEFAULT_CHAIN_ID } from "./networks";
 import { hasPermissionFor, type PermissionsPort } from "./permissions";
@@ -302,6 +303,8 @@ async function handle(
       return handleSendTransaction(deps, context, params);
     case "eth_signTypedData_v4":
       return handleSignTypedData(deps, context, params);
+    case "wallet_switchEthereumChain":
+      return switchChain(deps, params, "wallet_switchEthereumChain");
 
     // ---- Internal surface: extension UI only ----
     case "wallet_createMnemonic":
@@ -316,6 +319,8 @@ async function handle(
       return handleSetDefaultAccount(storage, params);
     case "wallet_setSiteAccount":
       return handleSetSiteAccount(deps, params);
+    case "wallet_setActiveNetwork":
+      return switchChain(deps, params, "wallet_setActiveNetwork");
     case "wallet_getConnectedSites":
       return handleGetConnectedSites(storage);
     case "wallet_disconnectSite":
@@ -325,9 +330,8 @@ async function handle(
     case "wallet_reset":
       return handleReset(deps);
     default:
-      // Covers the public methods still to come — eth_sendTransaction and
-      // eth_signTypedData_v4 (phase 6), wallet_switchEthereumChain and
-      // wallet_addEthereumChain (phase 8) — and genuine typos.
+      // Covers wallet_addEthereumChain, still to land in this phase, and
+      // genuine typos.
       throw new ProviderError(ProviderErrors.unsupportedMethod(method));
   }
 }
@@ -708,11 +712,19 @@ async function handleGetState({
  * que nos avise justo cuando el popup se abre. Preguntar siempre no puede
  * mentir.
  *
- * El coste es N `contains()` en paralelo, uno por red del catálogo. Y esto NO
- * está en el bucle caliente: el sondeo de saldos cada 5 s llama a
- * `wallet_getBalances`, no a `wallet_getState`, que solo se pide al abrir el
- * popup y después de una acción. Hay una comprobación manual que lo cronometra
- * en Chrome en vez de darlo por bueno aquí.
+ * El coste es N `contains()` en paralelo, uno por red del catálogo, y está
+ * MEDIDO, no supuesto: **0.409 ms de media** por llamada en Chrome con un
+ * perfil limpio (comprobación manual 56). Con las dos redes de serie son ~0.8 ms
+ * al abrir el popup. Y esto no está en el bucle caliente: el sondeo de saldos
+ * cada 5 s llama a `wallet_getBalances`, no a `wallet_getState`, que solo se
+ * pide al abrir el popup y después de una acción.
+ *
+ * Por eso NO hay caché. El umbral que lo haría revisable es 1 ms de media: por
+ * encima, habría que cachear mientras el popup está abierto e invalidar con
+ * `permissions.onAdded`/`onRemoved`. Estamos a menos de la mitad, y no cachear
+ * es una pieza menos de estado mutable en un worker que muere. Si alguien
+ * vuelve a plantearlo, que sea corriendo el snippet y comparando con 0.409, no
+ * por intuición.
  *
  * Las builtin se comprueban igual que las demás. Están en `host_permissions`,
  * así que deberían salir siempre concedidas — pero si el usuario restringe el

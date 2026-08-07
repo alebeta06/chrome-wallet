@@ -184,6 +184,21 @@ export function createNetworkStore(
       return findNetwork(networks, chainId);
     },
 
+    /**
+     * ------------------------------------------------------------------------
+     * EVERY WAY OF CHANGING THE CHAIN ANNOUNCES IT, BECAUSE THEY ALL COME HERE
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: la emisión vive DENTRO del store y no en quien llama. Hay tres
+     * caminos que mueven la red activa —el selector del popup, un
+     * `wallet_switchEthereumChain` de una dApp, y el clampeo de la migración— y
+     * dejar el `chainChanged` en cada uno significa que el cuarto se olvidará.
+     * El síntoma de olvidarlo no es un error: es una dApp que sigue creyendo que
+     * está en la red anterior hasta que alguien recarga.
+     *
+     * Un cambio a la red que ya estaba activa devuelve `true` y NO emite: la
+     * llamada tuvo éxito —estás donde pediste estar— pero no ha cambiado nada
+     * que contar.
+     */
     setActive(chainId: Hex): Promise<boolean> {
       return serialize(async () => {
         const current = await read();
@@ -191,6 +206,8 @@ export function createNetworkStore(
         if (current.chainId === chainId) return true;
 
         await persist({ networks: current.networks, chainId });
+        await announceChain(chainId);
+
         return true;
       });
     },

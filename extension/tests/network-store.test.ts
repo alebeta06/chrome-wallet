@@ -246,6 +246,8 @@ describe("createNetworkStore", () => {
       const { store, emitted } = storeWithEmitter(area);
       await store.upsert(POLYGON);
       await store.setActive(POLYGON.chainId);
+      // The arrange switched networks, which now announces on its own.
+      emitted.length = 0;
 
       await expect(store.fallbackIfUnusable(never)).resolves.toBe(DEFAULT_CHAIN_ID);
 
@@ -260,6 +262,7 @@ describe("createNetworkStore", () => {
       const { store, emitted } = storeWithEmitter(area);
       await store.upsert(POLYGON);
       await store.setActive(POLYGON.chainId);
+      emitted.length = 0;
       const writesBefore = area.writes;
 
       await expect(store.fallbackIfUnusable(always)).resolves.toBeNull();
@@ -280,6 +283,46 @@ describe("createNetworkStore", () => {
 
       await expect(store.fallbackIfUnusable(never)).resolves.toBeNull();
       expect(emitted).toEqual([]);
+    });
+
+    /**
+     * ------------------------------------------------------------------------
+     * IT FALLS BACK EVEN IF THE DEFAULT IS UNUSABLE TOO
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: comportamiento escrito, no deducido por descarte. Si el permiso
+     * de Anvil también estuviera revocado, la wallet se mueve a Anvil
+     * igualmente y NO se pone a buscar "alguna red que funcione".
+     *
+     * Buscar una usable sonaría mejor y es peor: dejaría al usuario en una red
+     * que no eligió —la primera que pasara el filtro— y firmando en ella sin
+     * haber hecho nada. Una wallet que se cambia sola de cadena es exactamente
+     * lo que nadie quiere que haga una wallet.
+     *
+     * Caer al DEFAULT es predecible: siempre el mismo sitio, es una builtin que
+     * no se puede borrar, y si tampoco es alcanzable el popup ya lo dice —
+     * aparece en `unusableChainIds` y el selector lo marca. Queda una wallet que
+     * no puede leer saldos y lo explica, en vez de una que te ha movido a una
+     * red que no reconoces.
+     *
+     * En la práctica es un caso de esquina: Anvil está en `host_permissions`, y
+     * la comprobación manual 57 midió que los hosts declarados salen concedidos.
+     * Está escrito porque "no llega a pasar" no es lo mismo que "está definido".
+     */
+    it("moves to the default even when the default is unusable too", async () => {
+      const area = countingArea();
+      const { store, emitted } = storeWithEmitter(area);
+      await store.upsert(POLYGON);
+      await store.setActive(POLYGON.chainId);
+      emitted.length = 0;
+
+      await expect(store.fallbackIfUnusable(never)).resolves.toBe(DEFAULT_CHAIN_ID);
+
+      expect((await store.read()).chainId).toBe(DEFAULT_CHAIN_ID);
+      // The chain did change, so the dApps are told. Being unreachable is a
+      // separate problem, and one the popup already surfaces.
+      expect(emitted).toEqual([
+        { name: "chainChanged", data: DEFAULT_CHAIN_ID, changedOrigin: null },
+      ]);
     });
 
     it("only asks about the active network", async () => {
