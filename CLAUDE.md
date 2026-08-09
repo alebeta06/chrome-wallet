@@ -180,9 +180,30 @@ ha cambiado nada que contar. Un evento que miente cuesta más que uno que falta.
 
 ## Permisos de host: cuándo se revoca (aprendido en la Fase 8)
 
-> **La wallet solo revoca por su cuenta si el endpoint mintió. Aparte de eso,
-> revoca cuando el usuario se lo pide: borrar la última red que usaba un patrón
-> ES la petición.**
+> **En Chrome la wallet NO PUEDE revocar ningún permiso de host. Lo que sigue
+> describe lo que DECIDE, no lo que consigue.**
+
+`chrome.permissions.remove()` lanza `You cannot remove required permissions` para
+cualquier origen http/https mientras el manifest declare un content script con
+`<all_urls>` — que es lo que declara una wallet, porque se inyecta en cualquier
+sitio o no es una wallet. La cadena entera, con los archivos de Chromium, está en
+la cabecera de `lib/permissions.ts`.
+
+**Está medido en Chrome** (comprobación 79), y en las dos direcciones: con el
+content script estrecho revoca de verdad, y con `<all_urls>` sigue lanzando
+aunque se quite el comodín de `optional_host_permissions`. La variable causal es
+`content_scripts[0].matches`. No se re-litigue con los patrones opcionales: esa
+hipótesis se midió y es falsa.
+
+> **Revocar un permiso por host es incompatible con una extensión que se inyecta
+> en todos los sitios.** No es un accidente de nuestro manifest: es la forma de
+> la API. Las dos salidas aparentes se cierran solas — estrechar los `matches`
+> deja de ser una wallet, y registrar el content script en runtime exige permiso
+> de host sobre esos orígenes, que reintroduce el mismo error por la otra rama.
+
+Que la decisión siga escrita —y probada— no es ceremonia: es la parte cara de
+razonar, y si Chrome cambia funciona sola. Lo que no vale es leer la tabla como
+si describiera efectos.
 
 El eje es **quién decide**, no qué ha pasado. Sin eso la tabla parece seis reglas
 sueltas y son dos:
@@ -195,14 +216,18 @@ sueltas y son dos:
 "Mintió" significa una cosa concreta y comprobable: `eth_chainId` contra el RPC
 propuesto devuelve una cadena distinta de la declarada. Nada más.
 
-| Camino | Permiso | Respuesta |
-|---|---|---|
-| `eth_chainId` devuelve otra cadena | **revocar** | -32602 |
-| el usuario borra la red que lo usaba | **revocar** † | — |
-| `eth_chainId` no responde | conservar | 4901 |
-| el usuario rechaza | conservar | 4001 |
-| cierra la ventana con la X | conservar | 4001 |
-| el worker muere antes de verificar | conservar | (sin respuesta) |
+| Camino | Decisión | Efecto real en Chrome | Respuesta |
+|---|---|---|---|
+| `eth_chainId` devuelve otra cadena | **revocar** | **no toma** ‡ | -32602 |
+| el usuario borra la red que lo usaba | **revocar** † | **no toma** | — |
+| `eth_chainId` no responde | conservar | conservado | 4901 |
+| el usuario rechaza | conservar | conservado | 4001 |
+| cierra la ventana con la X | conservar | conservado | 4001 |
+| el worker muere antes de verificar | conservar | conservado | (sin respuesta) |
+
+La columna que cambia es la del medio, y es nueva. La de *Respuesta* no cambia
+nada: los códigos son correctos y siguen siéndolo, porque no dependen de haber
+podido limpiar detrás.
 
 † **Solo si ninguna otra red del catálogo tiene el MISMO PATRÓN de origen** — no
 el mismo host — y calculado **dentro del mismo turno serializado** que el
@@ -215,7 +240,17 @@ independientes**, así que borrar la red de uno no puede tocar la del otro. Y al
 revés, `https://x.com/a` y `https://x.com/b` comparten patrón —la ruta no cuenta—
 así que borrar una no puede revocarle el permiso a la otra.
 
-Las cuatro filas que conservan dejan un **permiso huérfano**: un host alcanzable
+‡ **Éste no es un huérfano como los otros, y no se mezclan.** Las seis filas
+acaban ahora en un permiso que se queda, pero cinco de ellas dejan un host del
+que no sabemos nada malo —sobra un permiso y ya— y ésta deja concedido un host
+que **mintió sobre su identidad** y que la wallet decidió que no quería. Eso es
+una **degradación de seguridad real**, no residuo equivalente. Igualarlos hace
+que el lector concluya que da lo mismo, y no da lo mismo. Lo único que sobrevive
+del intento es un `console.error` con cuatro datos —quién lo pidió, la `rpcUrl`,
+la cadena declarada y la que reportó el nodo—, y el usuario puede quitar el
+permiso a mano desde `chrome://extensions`: la wallet no puede, él sí.
+
+Las cinco filas benignas dejan un **permiso huérfano**: un host alcanzable
 que ninguna red del catálogo usa. Se acepta, y el motivo no es que sea inofensivo
 —que lo es— sino que **la alternativa es peor**. Para recogerlos habría que
 llevar nuestra propia lista de lo que hemos pedido: estado mutable en un worker
@@ -229,11 +264,17 @@ Revocar por un nodo que no contesta castigaría un parpadeo con el diálogo nati
 entero otra vez, y no sabemos nada malo del endpoint: solo que ahora mismo no
 está.
 
-**La revocación del único caso que revoca se verifica.** `chrome.permissions.
-remove()` puede resolver `true` sin revocar nada — se midió en Brave durante el
-spike. Se vuelve a preguntar con `contains()`. Y si no se pudo revocar, el -32602
-se devuelve igual: no se da de alta una red que mintió solo porque no pudimos
-limpiar el permiso.
+**La revocación se verifica igualmente, y ahora más.** No basta con mirar el
+booleano de `remove()`: se vuelve a preguntar con `contains()`, que es la única
+fuente que ha demostrado no mentir. Si no se pudo revocar —o sea, siempre— el
+-32602 se devuelve igual: no se da de alta una red que mintió solo porque no
+pudimos limpiar el permiso.
+
+**Anomalía abierta, no explicada.** En Brave se vio `remove()` resolver `true`
+sin revocar nada durante el spike de la Fase 8. La cadena de Chromium predice que
+Brave debería **lanzar** igual que Chrome. O el fork diverge, o aquella anotación
+está mal tomada. No se ha vuelto a medir y no se da por cerrada; queda escrita
+como pregunta, que es lo honesto mientras nadie la mida.
 
 ## Ediciones automatizadas: verificar que casaron
 
@@ -341,9 +382,39 @@ Y como con las otras: rómpelo a propósito y comprueba que se pone rojo.
 
 ---
 
-Ésta es la cuarta de la misma familia: el `await` intermedio, el test de
-concurrencia que no se pone rojo, la edición automatizada que no casó, y ésta.
-**Las cuatro son comprobaciones que parecen hechas y no lo están.**
+## Una medición sobre otro artefacto no es una medición (Fase 8, segunda tanda)
+
+> **Antes de llevar una medición a una decisión de diseño, pregunta sobre qué
+> binario y qué manifest se tomó. Si no fue el que envía, no vale.**
+
+El spike del GATE 2 midió `contains()` **en Chrome** —con fecha y número: 0.409
+ms, `unusableChainIds: []`— y `remove()` **en Brave**, donde resolvió `true` sin
+revocar nada. De ahí se dio por bueno que la revocación funcionaba. `remove()` no
+se midió en Chrome ni una sola vez.
+
+La conclusión que sí se sacó era correcta —"el booleano miente, re-pregunta con
+`contains()`"— y arrastró sin decirlo una suposición que nadie midió en ningún
+sitio: *que por lo demás `remove()` hace su trabajo*. No la hacía, y no podía:
+`content_scripts.matches: ["<all_urls>"]` estaba en el **primer** manifest, nueve
+días antes del spike.
+
+El repo hizo bien la mitad difícil — los cinco sitios donde anotó esto decían
+"medido en Brave", con el nombre del navegador delante. Y aun así la conclusión
+viajó a Chrome sin que nadie lo notara al releerlo. **Escribir de dónde salió el
+dato no basta si al leerlo nadie comprueba que sigue aplicando.**
+
+El síntoma, como siempre en esta familia, no es un error: el código degradaba
+bien, los tests pasaban, y lo que estaba roto era lo que el proyecto **afirmaba**
+de sí mismo. Una invariante documentada describía un efecto que el navegador
+nunca permitió.
+
+---
+
+Ésta es la quinta de la misma familia: el `await` intermedio, el test de
+concurrencia que no se pone rojo, la edición automatizada que no casó, el test
+sobre dos instancias, y ésta. **Las cinco son comprobaciones que parecen hechas y
+no lo están.** Y ésta es la peor: una medición caducada al menos fue cierta
+alguna vez sobre el objeto medido — ésta no lo fue nunca.
 
 ## Git
 
