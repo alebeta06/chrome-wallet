@@ -1256,23 +1256,57 @@ Esperado, las tres cosas:
 
 - **-32602**, y el mensaje dice qué cadena reporta de verdad.
 - La red **no** está en `wallet_getState().networks`.
-- **El permiso quedó revocado**: en `chrome://extensions` → Site access,
-  `localhost:8546` ya no aparece. Compruébalo ahí, no fiándote del error.
+- **El permiso SIGUE concedido**: en `chrome://extensions` → Site access,
+  `localhost:8546` continúa ahí. No es un bug — ver abajo.
+- En la consola del **service worker**, un `console.error` con los cuatro datos:
+  el origen que lo pidió, `http://localhost:8546`, el `0x2a` declarado y el
+  `0x53a` que reporta el nodo. Los cuatro, no tres.
 
-Esta es la única situación en la que la wallet le quita al usuario un permiso
-que concedió. Si el permiso sigue puesto, hay un bug — o `remove()` no funcionó,
-y entonces el worker tiene que haber dejado un `console.error` diciéndolo.
+> **Esto medía otra cosa hasta agosto de 2026, y decía lo contrario.** Esperaba
+> ver el permiso revocado, porque la wallet lo intenta y porque el spike de la
+> Fase 8 lo daba por posible. No lo es: `chrome.permissions.remove()` lanza
+> `You cannot remove required permissions` para cualquier origen http/https
+> mientras el content script declare `<all_urls>` — está medido en la
+> comprobación 79 y explicado en la cabecera de `lib/permissions.ts`. El spike
+> había medido `remove()` en **Brave** y `contains()` en Chrome, y la conclusión
+> viajó de un navegador al otro sin que nadie lo notara.
+
+Si quieres dejar el perfil limpio, **quítalo a mano**: `chrome://extensions` →
+Site access → borra `localhost:8546`. La wallet no puede; tú sí.
+
+Y que ese permiso se quede **no es equivalente** a los otros huérfanos que el
+proyecto acepta. Los demás son hosts de los que no sabemos nada malo. Éste es un
+host que mintió sobre su identidad y que la wallet decidió que no quería: es una
+degradación de seguridad real, y el `console.error` es lo único que queda de ella.
 
 ## 65. El nodo caído NO cuesta el permiso
 
 Para el segundo Anvil (`Ctrl-C`) y repite la comprobación 63 con `0x53a`.
 
-Esperado: **4901**, la red no se añade, y **el permiso SIGUE concedido**.
-Vuelve a levantar Anvil, repite la llamada: funciona **sin que Chrome vuelva a
+> **Ojo: "el permiso sigue concedido" YA NO PRUEBA NADA aquí.** Desde la 64
+> sabemos que el permiso se queda **en los dos casos** — cuando el nodo no
+> responde y cuando el endpoint miente— porque Chrome no deja revocarlo en
+> ninguno. Mirar `chrome://extensions` no distingue "lo conservó" de "no pudo
+> quitarlo", y una comprobación que no distingue no es una comprobación.
+> El discriminante se muda al código y a la consola.
+
+Esperado, y las tres cosas juntas:
+
+- **4901**, no -32602. Ése es el primer discriminante: "no está" y "mintió" son
+  respuestas distintas.
+- En la consola del service worker **NO aparece** el `console.error` de la 64 —
+  ni ningún mensaje nombrando dos chainIds distintos. Aquí no hay ninguna cadena
+  que contradecir, porque el nodo no llegó a decir nada.
+- **NO aparece** tampoco el `Chrome refused to revoke …`. En este camino ni
+  siquiera se intenta revocar, que es justo lo que se está comprobando.
+
+Vuelve a levantar Anvil y repite la llamada: funciona **sin que Chrome vuelva a
 abrir el diálogo de permisos**, porque nunca se retiró.
 
-Es la diferencia entre "mintió" y "no está": revocar por un parpadeo del nodo
-obligaría a pasar otra vez por el diálogo nativo entero.
+Es la diferencia entre "mintió" y "no está": decidir revocar por un parpadeo del
+nodo obligaría a pasar otra vez por el diálogo nativo entero. Que hoy esa
+decisión no pueda ejecutarse no la borra — sigue siendo la decisión correcta, y
+es la que se ve en el código y en los tests.
 
 ## 66. Reconceder una red revocada
 
@@ -1441,12 +1475,28 @@ Chain ID que no sea hex.
 
 1. Añade Anvil Two (comprobación 73).
 2. Pulsa la ✕ de su fila.
-3. En `chrome://extensions` → Site access: `localhost:8546` **ya no está**.
-4. Y `localhost:8545` **sigue ahí**.
+3. La red **desaparece de la lista**, que es lo que pediste.
+4. En `chrome://extensions` → Site access: `localhost:8546` **sigue ahí**, y
+   `localhost:8545` también.
+5. En la consola del service worker, un `console.warn` —no un `error`— diciendo
+   que la red se borró y su permiso se queda.
 
-El paso 4 es el que importa. Mismo host, puerto distinto, **permisos
-independientes** — lo midió el spike de la Fase 8. Con la condición escrita por
-host, borrar Anvil Two habría dejado a Anvil de serie sin permiso.
+> **El título de esta comprobación mentía, y el paso 3 pedía lo contrario.**
+> Chrome no puede revocar (comprobación 79), así que el permiso se queda siempre.
+> La red se borra igual: borrar es lo que el usuario pidió, y revocar era aseo.
+
+Este huérfano **sí** es de los benignos, al revés que el de la 64: lo dejó un
+borrado que pediste tú, sobre un host del que no sabemos nada malo. Si quieres,
+se quita a mano desde la misma pantalla.
+
+> **Lo que esta comprobación ya no puede demostrar.** El paso 4 servía para
+> probar que la condición está escrita **por patrón y no por host** — mismo host,
+> puerto distinto, permisos independientes. Al no revocarse nada, los dos
+> permisos siguen ahí pase lo que pase y el paso no discrimina. Esa demostración
+> vive ahora **solo en los tests unitarios** de `network-rpc.test.ts` (los que
+> comprueban que se conserva el permiso cuando otra red comparte el patrón y que
+> se revoca exactamente una vez con dos borrados simultáneos), donde el fake sí
+> permite revocar. Se dice aquí en vez de dejar creer que esto lo cubre.
 
 Prueba también los tres rechazos, y lee los mensajes como si no supieras nada:
 
@@ -1496,3 +1546,73 @@ await provider.request({
 Esperado: el selector del popup **se mueve solo** a Sepolia, sin cerrarlo ni
 volver a abrirlo. No hay sondeo: el popup escucha `chrome.storage.onChanged`,
 que es donde el cambio deja huella pase por donde pase.
+
+## 79. Por qué `remove()` no puede revocar nada (medido)
+
+Esta no se repite en cada revisión: es un **experimento cerrado**, con su
+resultado escrito, del que dependen la 64, la 65 y la 75. Está aquí para que
+nadie tenga que volver a discutirlo de memoria — y sobre todo para que nadie
+vuelva a proponer la hipótesis equivocada, que es muy natural.
+
+**El síntoma.** `chrome.permissions.remove()` lanza `You cannot remove required
+permissions` para **cualquier** origen http/https de esta extensión, incluidos
+hosts limpios que no aparecen en el manifest.
+
+**La hipótesis natural, que es falsa:** que el comodín `https://*/*` de
+`optional_host_permissions` convierta en "requerido" lo que cae debajo.
+
+**La causa real:** `content_scripts[0].matches` es `<all_urls>`, Chrome lo
+instala como scriptable host **requerido**, y `remove()` rechaza cualquier
+patrón contenido en los requeridos. `ContainsPattern` es contención semántica,
+no pertenencia exacta, y `<all_urls>` contiene todo patrón http/https. La cadena
+con sus archivos de Chromium está en la cabecera de `lib/permissions.ts`.
+
+### Cómo se midió
+
+Las dos mitades predicen lo **contrario**, que es lo que hace que el experimento
+valga. Antes de cada intento, comprobar el baseline — `remove()` elimina en
+silencio lo que no esté concedido, así que un `true` sobre un patrón que no está
+no prueba nada:
+
+```js
+await chrome.permissions.contains({ origins: ["http://localhost:8546/*"] })  // TIENE que dar true
+```
+
+Y en cada mitad, tras editar `src/manifest.ts`: `pnpm build`, `chrome://extensions` → ↻.
+
+| | `content_scripts[0].matches` | `optional_host_permissions` |
+|---|---|---|
+| **A · discriminante** | `["http://localhost:3000/*"]` | intacto (con el comodín) |
+| **B · control inverso** | `["<all_urls>"]` | `["http://localhost:8546/*"]` |
+
+```js
+try { console.log('remove →', await chrome.permissions.remove({ origins: ["http://localhost:8546/*"] })) }
+catch (e) { console.log('THREW →', e.message) }
+console.log('contains después →', await chrome.permissions.contains({ origins: ["http://localhost:8546/*"] }))
+```
+
+**Medido** (Chrome, 8 de agosto de 2026):
+
+```
+A · content script estrecho, comodín intacto
+   baseline: true → remove: true → contains: false     ✅ REVOCA DE VERDAD
+
+B · <all_urls> de vuelta, comodín estrechado a un host
+   baseline: true → THREW: You cannot remove required permissions
+                  → contains: true                     ❌ NO REVOCA
+```
+
+**Veredicto.** La variable causal es `content_scripts[0].matches`. La anchura de
+`optional_host_permissions` **no interviene**: con el comodín fuera sigue
+lanzando, y con el comodín dentro pero el content script estrecho, revoca.
+
+Y no hay salida por manifest. Estrechar los `matches` devuelve `remove()` pero
+deja de ser una wallet — se inyecta en cualquier sitio o no sirve. Registrar el
+content script en runtime exige permiso de host sobre esos orígenes, que
+reintroduce el mismo error por la rama de los explicit hosts.
+
+> **Revocar un permiso por host es incompatible con una extensión que se inyecta
+> en todos los sitios.** No es un accidente de nuestro manifest: es la forma de
+> la API.
+
+Al terminar, revertir las dos líneas, `pnpm build`, ↻, y `git diff` vacío.

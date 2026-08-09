@@ -106,3 +106,51 @@ addChain   addNetworkFromWallet
 El permiso de Chrome y la verificación del chainId son obligatorios en los dos
 caminos, y viven en un solo sitio. La aprobación es lo único que sobra cuando el
 que pide es el dueño.
+
+### La revocación que la plataforma no deja hacer
+
+`src/lib/permissions.ts` → `revoke`
+
+La wallet tiene una regla de seguridad clara: si el RPC que una dApp propone
+**miente** sobre qué cadena sirve —lo declara `0x2a` y `eth_chainId` responde
+otra cosa—, la red no se añade y se le retira el permiso de host que el usuario
+acababa de conceder. Es el único caso en que la wallet le quita al usuario algo
+que él dio, y está escrito, comentado y probado.
+
+No funciona. **No puede funcionar.**
+
+```
+chrome.permissions.remove({ origins: ["http://localhost:8546/*"] })
+  → THREW: You cannot remove required permissions
+```
+
+Y el host no está en el manifest. Es un host limpio. Falla igual.
+
+La causa no está donde se busca. La primera hipótesis —la que cualquiera
+tendría— es que el comodín `https://*` de `optional_host_permissions` sea
+demasiado ancho. Se midió, y es falsa. La causa es ésta:
+
+```jsonc
+"content_scripts": [{ "matches": ["<all_urls>"], … }]
+```
+
+Chrome instala los `matches` de un content script como permisos **requeridos**, y
+`remove()` se niega a tocar cualquier patrón contenido en los requeridos.
+`<all_urls>` contiene todos. Con esa línea en el manifest, la extensión no puede
+revocar **ningún** host, nunca.
+
+Y una wallet no puede quitarla: se inyecta en cualquier sitio o no es una wallet.
+
+Lo bonito de contarlo es que las dos mitades del experimento dicen lo contrario
+la una de la otra, y se ven en una pantalla:
+
+```
+content script estrecho + comodín intacto    →  revoca de verdad
+<all_urls>       + comodín estrechado a uno  →  sigue lanzando
+```
+
+> Generalizable: **hay decisiones de diseño que la plataforma no te deja tomar, y
+> no te lo dice al compilar.** El código estaba bien escrito, los tests pasaban,
+> y la invariante que el proyecto afirmaba de sí mismo era falsa desde el primer
+> día. Solo se cae midiendo — y midiendo sobre el artefacto que envías, no sobre
+> uno parecido.
