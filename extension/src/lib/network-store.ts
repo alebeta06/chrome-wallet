@@ -279,10 +279,10 @@ export function createNetworkStore(
 
         /**
          * 🇪🇸 NOTA: se persiste ANTES de limpiar. Borrar es lo que el usuario
-         * pidió; revocar es aseo. Si la revocación falla —y `remove()` puede
-         * fallar, se midió en Brave— la red se queda borrada igual y el fallo
-         * queda en la consola del worker. Al revés dejaríamos al usuario con una
-         * red que sigue ahí porque no supimos limpiar detrás.
+         * pidió; revocar es aseo. Y la revocación no es que pueda fallar: en
+         * Chrome falla SIEMPRE —ver la cabecera de `lib/permissions.ts`—, así
+         * que este orden es el único que deja al usuario con lo que pidió. Al
+         * revés, ninguna red se borraría nunca porque no supimos limpiar detrás.
          */
         await persist({ networks: result.networks, chainId: current.chainId });
 

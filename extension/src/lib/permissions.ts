@@ -136,18 +136,69 @@ export async function hasPermissionFor(
  * Drops the permission for an endpoint, and CHECKS that it really went.
  *
  * ---------------------------------------------------------------------------
- * remove() CAN LIE
+ * EN CHROME ESTO NO PUEDE REVOCAR NADA, Y NO ES UN BUG NUESTRO
  * ---------------------------------------------------------------------------
- * 🇪🇸 NOTA: `chrome.permissions.remove()` devuelve un booleano y hay navegadores
- * que lo resuelven a true sin revocar nada. Se detectó en Brave durante el
- * spike de la Fase 8: los permisos opcionales seguían concedidos después de
- * llamar, y además su ajuste de "acceso al sitio: en todos los sitios" ensuciaba
- * la medición entera. La extensión se desarrolla y se evalúa en **Chrome**.
+ * 🇪🇸 NOTA: **hoy esta función siempre devuelve `false` en Chrome.** Está escrita
+ * igualmente, y esta nota existe para que nadie la borre por "muerta" ni la dé
+ * por funcionando. Ninguna de las dos lecturas es correcta.
  *
- * Por eso no basta con mirar el valor de retorno: se vuelve a preguntar con
- * `contains()`, que es la única fuente que ha demostrado no mentir. Devolver
- * true sin verificar dejaría a la UI diciendo "permiso revocado" con el permiso
- * intacto, que es la peor de las dos mentiras posibles.
+ * `chrome.permissions.remove()` LANZA `You cannot remove required permissions`
+ * para cualquier origen http/https de esta extensión. La cadena, leída en la
+ * fuente de Chromium:
+ *
+ *   1. `content_scripts[0].matches` es `<all_urls>` y Chrome lo instala como
+ *      scriptable host **REQUERIDO** (`content_scripts_handler.cc`,
+ *      `PermissionsParser::SetScriptableHosts`).
+ *   2. `remove()` re-parsea cada origen como patrón scriptable y pregunta
+ *      `required.scriptable_hosts().ContainsPattern(...)`
+ *      (`permissions_api_helpers.cc`).
+ *   3. `ContainsPattern` es **contención semántica**, no pertenencia exacta
+ *      (`url_pattern_set.cc` → `it.Contains(pattern)`), y `<all_urls>` contiene
+ *      cualquier patrón http/https (`url_pattern.cc`, `match_all_urls()`).
+ *   4. Con `required_scriptable_hosts` no vacío, `permissions_api.cc` responde
+ *      `kCantRemoveRequiredPermissionsError`. Fin.
+ *
+ * ---------------------------------------------------------------------------
+ * NO ES `optional_host_permissions`. ESTÁ MEDIDO. NO SE RE-LITIGA
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la hipótesis natural al toparse con esto es que el comodín
+ * `https://*\/*` de `optional_host_permissions` "convierte en requerido" lo que
+ * cae debajo. **Es falsa, y se midió en Chrome** — comprobación 79.
+ *
+ * (Sí, ese patrón lleva una barra invertida de más: escrito tal cual, el `*\/`
+ * cerraría este comentario. Costó un typecheck rojo averiguarlo.)
+ *
+ * Las dos mitades del experimento:
+ *
+ *   content script estrecho + comodín intacto    → remove() revoca DE VERDAD
+ *   `<all_urls>` + comodín estrechado a un host  → sigue lanzando
+ *
+ * La variable causal es `content_scripts[0].matches` y nada más. En
+ * `UnpackOriginPermissions` la clasificación de explicit hosts y la de
+ * scriptable hosts son bloques independientes: que el patrón caiga limpio en
+ * `optional_explicit_hosts` no evita el chequeo scriptable.
+ *
+ * Y no hay salida por manifest: estrechar los `matches` devuelve `remove()` pero
+ * deja de ser una wallet —se inyecta en cualquier sitio o no sirve—, y registrar
+ * el content script en runtime exige permiso de host sobre esos orígenes, que
+ * reintroduce el mismo error por la rama de los explicit hosts.
+ *
+ * ---------------------------------------------------------------------------
+ * remove() TAMBIÉN PUEDE MENTIR, QUE ES OTRA COSA
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: aparte de lo anterior, el booleano no es de fiar. En Brave se vio
+ * resolver `true` sin revocar nada durante el spike de la Fase 8 — y ojo, eso
+ * es una **anomalía abierta**: la cadena de arriba predice que Brave, que es
+ * Chromium, debería lanzar igual. O el fork diverge o aquella anotación está
+ * mal tomada. No se ha vuelto a medir, y no se da por explicado.
+ *
+ * Por eso se vuelve a preguntar con `contains()`, que es la única fuente que ha
+ * demostrado no mentir. Devolver true sin verificar dejaría a la UI diciendo
+ * "permiso revocado" con el permiso intacto, que es la peor de las dos mentiras
+ * posibles.
+ *
+ * Dónde se observa el efecto en el producto: comprobaciones 64 (el endpoint que
+ * mintió se queda con su permiso) y 75 (borrar una red deja el permiso).
  */
 export async function revoke(
   permissions: PermissionsPort,
@@ -160,7 +211,14 @@ export async function revoke(
     await permissions.remove(pattern);
     return !(await permissions.contains(pattern));
   } catch (cause) {
-    console.error(`[codecrypto] could not revoke ${pattern}:`, cause);
+    /**
+     * 🇪🇸 NOTA: `warn` y no `error` porque en Chrome éste es el camino NORMAL,
+     * no una anomalía — ver la cabecera. Quien tenga algo grave que contar por
+     * haberse quedado sin revocar es el llamante, que es el que sabe si esto
+     * era aseo o seguridad; aquí solo se deja la causa, que es donde se lee el
+     * `You cannot remove required permissions` literal.
+     */
+    console.warn(`[codecrypto] Chrome refused to revoke ${pattern}:`, cause);
     return false;
   }
 }

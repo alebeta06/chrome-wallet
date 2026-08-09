@@ -306,7 +306,7 @@ export async function addChain(
     ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
   });
 
-  await finaliseAdd({ networks, permissions, readChainId }, draft);
+  await finaliseAdd({ networks, permissions, readChainId }, draft, context.origin);
   return null;
 }
 
@@ -328,6 +328,12 @@ export async function addChain(
 export async function finaliseAdd(
   { networks, permissions, readChainId }: FinaliseDeps,
   draft: NetworkDraft,
+  /**
+   * Who asked, for the forensic line in `revokeAfterLie`. Required on purpose:
+   * a lie has to be attributable, and an optional parameter would quietly
+   * default to "nobody" at the call site that forgot it.
+   */
+  requester: string,
 ): Promise<NetworkConfig> {
   /**
    * 🇪🇸 NOTA: se pregunta por el permiso aunque quien llama crea tenerlo. Es la
@@ -353,7 +359,7 @@ export async function finaliseAdd(
   const reported = await readChainId(candidate);
 
   if (canonicalChainId(reported) !== draft.chainId) {
-    await revokeAfterLie(permissions, draft, reported);
+    await revokeAfterLie(permissions, draft, reported, requester);
 
     throw invalidParams(
       `That endpoint reports chain ${String(reported)}, not ${draft.chainId}. ` +
@@ -407,31 +413,59 @@ export async function addNetworkFromWallet(
     );
   }
 
-  await finaliseAdd(deps, draft);
+  /**
+   * 🇪🇸 NOTA: no es un `Origin` y por eso no lo parece. Aquí no hay tercero: lo
+   * pidió el usuario desde `network.html`. Escribirlo como si fuera un origen
+   * —`"wallet"`, o peor, el de la extensión— haría que un log de un endpoint
+   * mentiroso se leyera como si una dApp lo hubiera pedido.
+   */
+  await finaliseAdd(deps, draft, "the wallet's own network form");
   return (await deps.networks.read()).networks;
 }
 
 /**
- * The one case where a granted permission is taken back.
+ * The one case where the wallet takes a permission back on its own — and, in
+ * Chrome, the one case where it cannot.
  *
- * 🇪🇸 NOTA: `remove()` puede resolver `true` sin revocar nada — medido en Brave
- * durante el spike de la Fase 8 — así que `revoke()` vuelve a preguntar con
- * `contains()`. Y si no se pudo revocar, la llamada falla IGUAL: no se da de
- * alta una red que mintió sobre su cadena solo porque no pudimos limpiar el
- * permiso. Queda el aviso en la consola del worker y nada más.
+ * ---------------------------------------------------------------------------
+ * ESTE HUÉRFANO NO ES COMO LOS OTROS CUATRO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: en Chrome la revocación NO puede tomar —ver la cabecera de
+ * `lib/permissions.ts`, medido en la comprobación 79—, así que el permiso se
+ * queda concedido para un host que acaba de mentir sobre su identidad.
+ *
+ * Eso **no** es lo mismo que los cuatro permisos huérfanos que el proyecto ya
+ * acepta. Los otros cuatro —el usuario rechaza, cierra con la X, el nodo no
+ * responde, el worker muere antes de verificar— son hosts de los que no sabemos
+ * nada malo: sobra un permiso y ya. Éste es el único caso en que el endpoint
+ * **mintió** sobre qué cadena sirve y la wallet decidió que no lo quería. Que se
+ * quede es una **degradación de seguridad real**, no residuo equivalente. Quien
+ * lea esto no debe concluir que da lo mismo, porque no da lo mismo.
+ *
+ * Lo único que sobrevive del intento de engaño es este `console.error`, y por
+ * eso lleva los cuatro datos: quién lo pidió, la `rpcUrl`, la cadena declarada y
+ * la que reportó el nodo. Sin los cuatro no sirve de nada a posteriori.
+ *
+ * Y la llamada falla IGUAL: no se da de alta una red que mintió solo porque no
+ * pudimos limpiar el permiso detrás.
  */
 async function revokeAfterLie(
   permissions: PermissionsPort,
   draft: NetworkDraft,
   reported: unknown,
+  requester: string,
 ): Promise<void> {
-  console.warn(
-    `[codecrypto] ${draft.rpcUrl} declared ${draft.chainId} and reports ${String(reported)}`,
-  );
+  const revoked = await revoke(permissions, draft.rpcUrl);
 
-  if (!(await revoke(permissions, draft.rpcUrl))) {
-    console.error(`[codecrypto] could not revoke the host permission for ${draft.rpcUrl}`);
-  }
+  console.error(
+    `[codecrypto] ${requester} asked to add chain ${draft.chainId} at ${draft.rpcUrl}, ` +
+      `and that endpoint reports ${String(reported)}. The network was NOT added. ` +
+      (revoked
+        ? "Its host permission was revoked."
+        : "Its host permission is STILL GRANTED: Chrome cannot revoke it while this " +
+          "extension injects a content script into every site. Remove it by hand at " +
+          "chrome://extensions."),
+  );
 }
 
 // ============================================================================
@@ -503,13 +537,24 @@ export async function removeNetworkRpc(
     if (stillUsed) return;
 
     /**
-     * 🇪🇸 NOTA: si la revocación no toma —`remove()` puede resolver `true` sin
-     * revocar nada, se midió en Brave— la red se queda borrada IGUAL. Borrar es
-     * lo que el usuario pidió; revocar es aseo, y no se le deshace una petición
-     * porque no supimos limpiar detrás. Queda el aviso en la consola del worker.
+     * 🇪🇸 NOTA: en Chrome esta revocación NUNCA toma —ver la cabecera de
+     * `lib/permissions.ts`— y la red se queda borrada IGUAL. Borrar es lo que el
+     * usuario pidió; revocar es aseo, y no se le deshace una petición porque no
+     * supimos limpiar detrás.
+     *
+     * El huérfano que queda aquí sí es de los benignos: el usuario borró una red
+     * suya y del host no sabemos nada malo. Es otra cosa que el de
+     * `revokeAfterLie`, donde el endpoint mintió — no se mezclan.
+     *
+     * Y `stillUsed` se sigue calculando aunque hoy su respuesta no pueda tener
+     * efecto: lo que se preserva es la DECISIÓN —revocar solo si ninguna otra
+     * red comparte el patrón—, que es la parte cara de razonar y la que los
+     * tests fijan. Si Chrome cambia, esto funciona solo.
      */
     if (!(await revoke(permissions, removed.rpcUrl))) {
-      console.error(`[codecrypto] removed ${removed.name} but could not revoke ${pattern}`);
+      console.warn(
+        `[codecrypto] removed ${removed.name}; its host permission for ${pattern} stays granted`,
+      );
     }
   });
 
