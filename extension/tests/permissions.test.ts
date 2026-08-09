@@ -200,6 +200,32 @@ describe("revoke", () => {
     await expect(revoke(permissions, "http://localhost:8546")).resolves.toBe(false);
   });
 
+  /**
+   * ------------------------------------------------------------------------
+   * Y EN CHROME remove() NI SIQUIERA LLEGA A RESOLVER: LANZA
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: éste es el caso REAL, y hasta ahora no lo cubría ningún test — se
+   * cubría el de Brave, que es el raro. Con un content script `<all_urls>`,
+   * Chrome rechaza `remove()` con `You cannot remove required permissions` para
+   * cualquier origen http/https. Ver la cabecera de `lib/permissions.ts` y la
+   * comprobación 79.
+   *
+   * `revoke` tiene que devolver `false` sin propagar: quien llama decide si eso
+   * era aseo (borrar una red) o seguridad (un endpoint que mintió), y ninguno de
+   * los dos caminos debe romperse porque el navegador no deje limpiar.
+   */
+  it("reports false when chrome refuses to remove, without throwing", async () => {
+    const permissions: PermissionsPort = {
+      contains: () => Promise.resolve(true),
+      remove: () => Promise.reject(new Error("You cannot remove required permissions")),
+    };
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(revoke(permissions, "http://localhost:8546")).resolves.toBe(false);
+    expect(warnings).toHaveBeenCalled();
+    warnings.mockRestore();
+  });
+
   it("revokes one port without touching another", async () => {
     const permissions = portHolding("http://localhost:8545/*", "http://localhost:8546/*");
 

@@ -257,22 +257,47 @@ function approver(outcome: "approve" | "reject") {
 }
 
 /** A permissions port whose grants a test can flip mid-flight. */
+/**
+ * A permissions port with three behaviours, and knowing which is which matters.
+ *
+ * 🇪🇸 NOTA: por defecto `remove()` FUNCIONA, y eso es un navegador que no existe
+ * para esta extensión. Chrome no puede revocar ningún origen http/https mientras
+ * haya un content script con `<all_urls>` — ver la cabecera de
+ * `lib/permissions.ts` y la comprobación 79.
+ *
+ * El fake se queda así a propósito: lo que estos tests fijan es **la decisión**
+ * —revocar solo cuando ninguna otra red comparte el patrón—, no el efecto, que
+ * hoy no puede llegar. Un test cuya aserción sea `holds(...) === false` prueba
+ * que se pidió la revocación, NO que la wallet revoque en Chrome. No se lea de
+ * la otra forma.
+ *
+ * Los dos modos rotos son cosas distintas:
+ *   breakRemove()  → resuelve `true` sin revocar. La anomalía de Brave del
+ *                    GATE 2, que sigue sin explicación.
+ *   refuseRemove() → lanza. Esto es Chrome, medido, y es el caso REAL.
+ */
 function grantable(...initial: string[]) {
   const held = new Set(initial);
-  let removeWorks = true;
+  let mode: "works" | "lies" | "refuses" = "works";
 
   return {
     port: {
       contains: (pattern: string) => Promise.resolve(held.has(pattern)),
       remove: (pattern: string) => {
-        if (removeWorks) held.delete(pattern);
+        if (mode === "refuses") {
+          return Promise.reject(new Error("You cannot remove required permissions"));
+        }
+        if (mode === "works") held.delete(pattern);
         return Promise.resolve(true);
       },
     } satisfies PermissionsPort,
     grant: (pattern: string) => held.add(pattern),
     holds: (pattern: string) => held.has(pattern),
     breakRemove: () => {
-      removeWorks = false;
+      mode = "lies";
+    },
+    refuseRemove: () => {
+      mode = "refuses";
     },
   };
 }
@@ -472,6 +497,43 @@ describe("addChain", () => {
 
       expect(findNetwork((await networks.read()).networks, "0x89")).toBeUndefined();
       expect(permissions.holds("https://polygon-rpc.com/*")).toBe(true);
+    });
+
+    /**
+     * ------------------------------------------------------------------------
+     * LO ÚNICO QUE SOBREVIVE DEL ENGAÑO SON CUATRO DATOS EN UNA LÍNEA
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: en Chrome el permiso del mentiroso NO se puede revocar
+     * (comprobación 79), así que se queda concedido para un host que acaba de
+     * mentir sobre su identidad. Es una degradación de seguridad real, y el
+     * único rastro que queda es este `console.error`.
+     *
+     * Por eso el test afirma los CUATRO datos uno a uno, y no que "se avisó":
+     * quién lo pidió, la rpcUrl, la cadena declarada y la que reportó el nodo.
+     * Con tres de los cuatro, la línea no sirve para reconstruir nada.
+     */
+    it("names who asked, the endpoint, and both chain ids when Chrome refuses to revoke", async () => {
+      const permissions = grantable("https://polygon-rpc.com/*");
+      permissions.refuseRemove();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { deps, networks } = await addSetup({
+        permissions: permissions.port,
+        reports: "0x1",
+      });
+
+      await expectRejection(addChain(deps, [POLYGON_PARAM], FROM), ErrorCode.INVALID_PARAMS);
+
+      expect(findNetwork((await networks.read()).networks, "0x89")).toBeUndefined();
+      expect(permissions.holds("https://polygon-rpc.com/*")).toBe(true);
+
+      const line = errors.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(line).toContain("https://dapp.example"); // quién lo pidió
+      expect(line).toContain("https://polygon-rpc.com"); // el endpoint
+      expect(line).toContain("0x89"); // la cadena declarada
+      expect(line).toContain("0x1"); // la que reportó el nodo
+      expect(line).toContain("chrome://extensions"); // cómo lo quita el usuario
+      vi.restoreAllMocks();
     });
 
     /**
@@ -833,11 +895,39 @@ describe("removeNetworkRpc", () => {
     /**
      * 🇪🇸 NOTA: borrar es lo que el usuario pidió; revocar es aseo. No se le
      * deshace una petición porque no supimos limpiar detrás. `remove()` puede
-     * resolver `true` sin revocar nada — se midió en Brave.
+     * resolver `true` sin revocar nada — la anomalía de Brave del GATE 2.
      */
     it("still removes the network when the revocation does not take", async () => {
       const permissions = grantable("https://polygon-rpc.com/*");
       permissions.breakRemove();
+      const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { deps, networks } = await setup({ permissions: permissions.port, extra: [POLYGON] });
+
+      await removeNetworkRpc(deps, [{ chainId: POLYGON.chainId }]);
+
+      expect(findNetwork((await networks.read()).networks, POLYGON.chainId)).toBeUndefined();
+      expect(permissions.holds("https://polygon-rpc.com/*")).toBe(true);
+      expect(warnings).toHaveBeenCalled();
+      warnings.mockRestore();
+    });
+
+    /**
+     * ------------------------------------------------------------------------
+     * Y ESTO ES LO QUE PASA EN CHROME, SIEMPRE
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: el de arriba modela la rareza de Brave; éste modela el único
+     * comportamiento que Chrome tiene. `remove()` LANZA `You cannot remove
+     * required permissions` para cualquier origen http/https mientras el content
+     * script declare `<all_urls>` — medido en la comprobación 79.
+     *
+     * Se afirma `warn` y NO `error`: el huérfano de un borrado es benigno —el
+     * usuario pidió borrar, y del host no sabemos nada malo—. El `error` está
+     * reservado al endpoint que mintió, que es otra cosa.
+     */
+    it("removes the network in Chrome, where the revocation always throws", async () => {
+      const permissions = grantable("https://polygon-rpc.com/*");
+      permissions.refuseRemove();
+      const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
       const errors = vi.spyOn(console, "error").mockImplementation(() => {});
       const { deps, networks } = await setup({ permissions: permissions.port, extra: [POLYGON] });
 
@@ -845,7 +935,10 @@ describe("removeNetworkRpc", () => {
 
       expect(findNetwork((await networks.read()).networks, POLYGON.chainId)).toBeUndefined();
       expect(permissions.holds("https://polygon-rpc.com/*")).toBe(true);
-      expect(errors).toHaveBeenCalled();
+      expect(warnings).toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      warnings.mockRestore();
+      errors.mockRestore();
     });
   });
 
