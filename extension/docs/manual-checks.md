@@ -1730,8 +1730,30 @@ Prueba también el camino inverso —volver a *On all sites*— y mira si
 > redes a la vez"* en vez de *"un host"*, porque el desplegable no distingue. La
 > 59 en particular habría que replantearla entera: medía que revocar un host que
 > **no** era el de la red activa no te mueve de sitio, y por esta vía se van
-> todos a la vez, así que no queda un host "otro" que revocar. Si no retira: el
-> listener de `background.ts` no tiene disparador conocido, y toca decidir si se
-> borra o se deja documentado como red de seguridad.
+> todos a la vez, así que no queda un host "otro" que revocar.
 
-Anota el resultado aquí, con fecha y navegador, como la 56, la 57 y la 79.
+> ⚠️ **Y si sale que NO retira: no se borra el listener en la misma tanda.** Se
+> marca como no alcanzable, con esta medición al lado, y se decide aparte.
+> Borrar código de seguridad a la primera medición es exactamente el movimiento
+> que esta fase ha enseñado a no hacer: llevamos dos casos —el spike de Brave y
+> la revocación a mano— en los que una medición se dio por concluyente antes de
+> tiempo. Una tercera no.
+
+### El resultado se anota aquí, con fecha y navegador
+
+Sin excepción, salga lo que salga. En esta fase ya han viajado **dos** mediciones
+fuera de su contexto —`remove()` medido en Brave y leído como si fuera Chrome, y
+el control por host que dejó de existir sin que ninguna comprobación lo notara—,
+así que ésta nace fechada. Rellenar tal cual:
+
+```
+**Medido** (navegador y versión, perfil, fecha):
+
+  baseline contains()            → ?
+  tras mover a "On click"        → ?
+  ¿aviso en el service worker?   → ?
+  unusableChainIds               → ?
+  al volver a "On all sites"     → ?
+
+**Veredicto:** …
+```
