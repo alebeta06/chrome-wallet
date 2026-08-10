@@ -247,8 +247,10 @@ que **mintió sobre su identidad** y que la wallet decidió que no quería. Eso 
 una **degradación de seguridad real**, no residuo equivalente. Igualarlos hace
 que el lector concluya que da lo mismo, y no da lo mismo. Lo único que sobrevive
 del intento es un `console.error` con cuatro datos —quién lo pidió, la `rpcUrl`,
-la cadena declarada y la que reportó el nodo—, y el usuario puede quitar el
-permiso a mano desde `chrome://extensions`: la wallet no puede, él sí.
+la cadena declarada y la que reportó el nodo—. **Y no hay salida que ofrecer:
+`chrome://extensions` no da control por host** (medido en la segunda tanda de la
+Fase 8), así que ni la wallet ni el usuario pueden retirarlo. El mensaje no
+sugiere ninguna, porque mandar a buscar algo que no existe es peor que callar.
 
 Las cinco filas benignas dejan un **permiso huérfano**: un host alcanzable
 que ninguna red del catálogo usa. Se acepta, y el motivo no es que sea inofensivo
@@ -259,6 +261,11 @@ el spike de la Fase 8 midió que `chrome.permissions.getAll()` devuelve
 `<all_urls>` por los `matches` del content script, así que **no sirve para
 enumerar lo concedido**. Que reintentar el alta funcione sin segundo diálogo es
 el consuelo, no la justificación.
+
+Ese razonamiento ha quedado **discutible por arriba**: hoy da igual lo buena que
+fuera la lista, porque no habría con qué retirarlos. Se deja escrito porque
+describe bien por qué no se intentó, y porque volvería a aplicar entero el día
+que revocar sea posible.
 
 Revocar por un nodo que no contesta castigaría un parpadeo con el diálogo nativo
 entero otra vez, y no sabemos nada malo del endpoint: solo que ahora mismo no
