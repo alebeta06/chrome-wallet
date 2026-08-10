@@ -182,8 +182,20 @@ void networks.migrate().catch((cause: unknown) => {
  * ---------------------------------------------------------------------------
  * THE USER CAN REVOKE A HOST WITHOUT EVER OPENING THE WALLET
  * ---------------------------------------------------------------------------
- * 🇪🇸 NOTA: `chrome://extensions` deja quitar un permiso de host cuando quiera,
- * y la wallet no participa en esa decisión — solo se entera por este evento. Si
+ * ⚠️ 🇪🇸 OJO: esta cabecera afirma algo que ya no consta. Se midió (Fase 8,
+ * segunda tanda) que `chrome://extensions` **no** ofrece ninguna lista de hosts
+ * concedidos desde la que quitar uno, y la wallet tampoco puede revocar por
+ * código — ver la cabecera de `lib/permissions.ts`. Con lo cual **no se conoce
+ * hoy ningún camino que dispare este listener**, y podría ser código inalcanzable.
+ *
+ * Queda puesto a propósito, no por descuido: el único candidato que queda —mover
+ * Site access a "On click"— está SIN MEDIR, y es la comprobación 80. Si retira
+ * permisos, esto se dispara y todo lo de abajo sigue siendo cierto. Si no,
+ * habrá que decidir si se borra. Borrarlo antes de medirlo sería quitar la red
+ * de seguridad de un caso que no sabemos si existe.
+ *
+ * 🇪🇸 NOTA: la wallet no participa en esa decisión — solo se entera por este
+ * evento, venga de donde venga la retirada. Si
  * el revocado era el de la red activa, todo lo que consulte la red empieza a
  * fallar y el popup no tendría cómo explicarlo: las cuentas siguen ahí, la red
  * sigue en el selector, y los saldos simplemente no llegan.

@@ -46,9 +46,13 @@ export function useWalletState(): WalletStateHook {
    * ------------------------------------------------------------------------
    * 🇪🇸 NOTA: hasta la Fase 8 el estado solo cambiaba por acciones del propio
    * popup, así que bastaba con volver a pedirlo después de cada una. Ya no: una
-   * dApp puede llamar a `wallet_switchEthereumChain`, y revocar un permiso desde
-   * `chrome://extensions` mueve la red activa sola. Sin esto, el popup abierto
-   * seguiría enseñando la red anterior hasta que alguien lo cerrara y abriera.
+   * dApp puede llamar a `wallet_switchEthereumChain`, y perder el permiso de la
+   * red activa la mueve sola. Sin esto, el popup abierto seguiría enseñando la
+   * red anterior hasta que alguien lo cerrara y abriera.
+   *
+   * (Lo segundo hoy no se sabe provocar a mano: `chrome://extensions` no da
+   * control por host. Ver la comprobación 80. Lo primero pasa igual, y basta
+   * para justificar esto.)
    *
    * Se escucha `chrome.storage.onChanged` y no se añade un mensaje nuevo al
    * contrato: el cambio YA deja huella en storage —es la única fuente de verdad

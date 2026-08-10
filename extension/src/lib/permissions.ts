@@ -184,6 +184,25 @@ export async function hasPermissionFor(
  * reintroduce el mismo error por la rama de los explicit hosts.
  *
  * ---------------------------------------------------------------------------
+ * Y EL USUARIO TAMPOCO PUEDE, AL MENOS NO POR HOST
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la salida obvia —"la wallet no puede, pero el usuario sí desde
+ * `chrome://extensions`"— **tampoco existe**. Medido en la Fase 8, segunda
+ * tanda: esa pantalla solo ofrece el desplegable de Site access (On click / On
+ * specific sites / On all sites) y **ninguna lista de hosts concedidos**. "On
+ * specific sites" abre un diálogo para AÑADIR un sitio, no para quitar uno.
+ *
+ * Consecuencia: el estado "red en el catálogo con su permiso revocado" no es
+ * alcanzable a mano, y por eso seis comprobaciones manuales de la Fase 8 están
+ * marcadas NO EJECUTABLE. No se les ofrece salida a los usuarios en ningún
+ * mensaje, porque mandar a buscar algo que no existe es peor que callar.
+ *
+ * Lo que NO está medido —y decide si el listener de `permissions.onRemoved` de
+ * `background.ts` es alcanzable siquiera— es si mover ese desplegable a "On
+ * click" retira los permisos concedidos. Es la comprobación 80, y está sin
+ * correr. No se dé por ninguna de las dos cosas hasta entonces.
+ *
+ * ---------------------------------------------------------------------------
  * remove() TAMBIÉN PUEDE MENTIR, QUE ES OTRA COSA
  * ---------------------------------------------------------------------------
  * 🇪🇸 NOTA: aparte de lo anterior, el booleano no es de fiar. En Brave se vio

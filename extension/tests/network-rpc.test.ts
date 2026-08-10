@@ -532,7 +532,7 @@ describe("addChain", () => {
       expect(line).toContain("https://polygon-rpc.com"); // el endpoint
       expect(line).toContain("0x89"); // la cadena declarada
       expect(line).toContain("0x1"); // la que reportó el nodo
-      expect(line).toContain("chrome://extensions"); // cómo lo quita el usuario
+      expect(line).toContain("STILL GRANTED"); // el hecho de seguridad, sin salida que ofrecer
       vi.restoreAllMocks();
     });
 

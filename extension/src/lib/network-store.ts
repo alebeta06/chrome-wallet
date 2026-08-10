@@ -298,8 +298,9 @@ export function createNetworkStore(
      * ------------------------------------------------------------------------
      * A REVOKED PERMISSION LEAVES THE WALLET POINTING AT A DEAD NETWORK
      * ------------------------------------------------------------------------
-     * 🇪🇸 NOTA: el usuario puede quitar un permiso de host desde
-     * `chrome://extensions` en cualquier momento, sin pasar por la wallet. Si
+     * 🇪🇸 NOTA: si un permiso de host desaparece sin pasar por la wallet —hoy no
+     * se conoce ningún camino para provocarlo a mano, ver la cabecera de
+     * `lib/permissions.ts` y la comprobación 80— la wallet se entera tarde. Si
      * era el de la red activa, todo lo que consulte la red empieza a fallar y
      * el popup no tendría forma de explicar por qué: las cuentas están, la red
      * está en el selector, y los saldos no llegan.

@@ -446,6 +446,13 @@ export async function addNetworkFromWallet(
  * eso lleva los cuatro datos: quién lo pidió, la `rpcUrl`, la cadena declarada y
  * la que reportó el nodo. Sin los cuatro no sirve de nada a posteriori.
  *
+ * Y no se le ofrece al usuario ninguna salida, porque no la hay: la pantalla de
+ * `chrome://extensions` de este Chrome solo tiene el desplegable de Site access
+ * —On click / On specific sites / On all sites— y **ninguna lista de hosts
+ * concedidos** desde la que quitar uno. Medido en la Fase 8, segunda tanda. Un
+ * mensaje que mandara ahí a buscar algo que no existe sería peor que no decir
+ * nada.
+ *
  * Y la llamada falla IGUAL: no se da de alta una red que mintió solo porque no
  * pudimos limpiar el permiso detrás.
  */
@@ -462,9 +469,9 @@ async function revokeAfterLie(
       `and that endpoint reports ${String(reported)}. The network was NOT added. ` +
       (revoked
         ? "Its host permission was revoked."
-        : "Its host permission is STILL GRANTED: Chrome cannot revoke it while this " +
-          "extension injects a content script into every site. Remove it by hand at " +
-          "chrome://extensions."),
+        : "Its host permission is STILL GRANTED and nobody can drop it: Chrome refuses " +
+          "remove() while this extension injects a content script into every site, and its " +
+          "extensions page offers no per-host control either."),
   );
 }
 
