@@ -1443,13 +1443,16 @@ Esperado en el paso 5: **se abre una ventana** que dice *"restore access"*, no u
 > la aserción de esta comprobación**, y no depende de nada de Chrome: es lógica
 > de la wallet decidiendo que un alta con el permiso ausente no es idempotente.
 
-⚠️ **Lo que pasa DESPUÉS de aprobar está sin medir.** Con Site access en *On
-click* los permisos están retenidos globalmente, y no sabemos si un
-`chrome.permissions.request()` desde la ventana los recupera, si el diálogo sale
-siquiera, o si Chrome lo ignora mientras el interruptor siga ahí. Anota lo que
-veas; **si el permiso no vuelve, no lo des por un bug de la wallet** sin mirar
-antes si el interruptor lo estaba impidiendo. Distinguirlo es fácil: devuelve
-Site access a *On all sites* y mira si entonces el `switch` del paso 4 funciona.
+**Medido** (Chrome, 10 de agosto de 2026, observado al pasar la comprobación 76):
+`chrome.permissions.request()` **sí reconcede con el interruptor en *On click***.
+El diálogo aparece, se concede, y la red vuelve a ser usable sin tocar Site
+access. Tras aprobar, el `switch` del paso 4 funciona.
+
+> **Y reconcede SELECTIVAMENTE, que es lo que no se esperaba.** Tras restaurar
+> Anvil Two, esa red quedó usable mientras Anvil Local y Sepolia seguían
+> tachadas. O sea: el interruptor retiene todo a la vez, pero recuperar va de una
+> en una. **La asimetría es la noticia** — el camino de vuelta sí distingue
+> hosts, aunque el de ida no.
 
 ## 67. Dos altas a la vez con RPC distinto
 
@@ -1629,9 +1632,20 @@ que tú elegiste y que hasta hace un momento usabas.
 
 Prueba también los tres rechazos, y lee los mensajes como si no supieras nada:
 
-- ✕ en una red de serie → *"comes with CodeCrypto Wallet and cannot be removed"*.
 - ✕ en la red **activa** → dice que **cambies de red primero**. Es el único de los
   tres que el usuario puede arreglar, y el único que dice cómo.
+
+> **El rechazo de "red de serie" no se puede provocar desde el popup, y está
+> bien así.** Las builtin **no tienen ✕** — comprobado el 10 de agosto de 2026.
+> No es que el botón falle: es que no está. Un botón que siempre acaba en un
+> mensaje de error es peor UI que un botón ausente, porque invita a pulsarlo
+> para descubrir que no.
+>
+> Consecuencia honesta: ese rechazo queda cubierto **solo por test**
+> (`networks.test.ts` → *refuses to touch a built-in*, y la tabla de motivos de
+> `removeNetwork`), y **por diseño de la UI**, no por un hueco. La defensa sigue
+> haciendo falta porque `wallet_removeNetwork` también llega desde una dApp,
+> donde no hay UI que la proteja.
 
 ## 76. Una red sin acceso: marcada, y con salida
 

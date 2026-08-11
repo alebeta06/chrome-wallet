@@ -106,8 +106,21 @@ extensión, escribir en `cc:networks` una entrada con un `rpcUrl` jamás concedi
 
 **La comprobación 80 lo dejó NO URGENTE, no inútil.** El interruptor de Site
 access ya desbloquea las 76 y 77, así que esto ha dejado de ser la única vía. Lo
-que no ha dejado de ser es **la única que aísla UNA red**: el interruptor es todo
-o nada y se lleva por delante Anvil, Sepolia y las de usuario a la vez.
+que no ha dejado de ser es **la única que aísla UNA red al RETIRARLA**.
+
+Y aquí hay una asimetría que conviene tener clara antes de diseñar el e2e, medida
+el 10 de agosto de 2026 al pasar la 76:
+
+| Dirección | ¿Distingue hosts? |
+|---|---|
+| **retirar** — interruptor de Site access | **no**: se lleva todas a la vez |
+| **recuperar** — `permissions.request()` desde la ventana Restore | **sí**: se restauró Anvil Two dejando Anvil Local y Sepolia tachadas |
+
+Así que se puede llegar a "una sola red sin permiso" **por resta**: retirar todas
+con el interruptor y recuperar las que sobran una a una. Sirve, pero es un
+camino largo, con un diálogo nativo por red —el mismo que el punto 2 dice que
+Playwright no alcanza— y con el estado dependiendo del orden. Para un test
+automatizado, sembrar `cc:networks` sigue siendo la vía limpia.
 
 Quién lo necesita, en concreto:
 
