@@ -50,9 +50,9 @@ export function useWalletState(): WalletStateHook {
    * red activa la mueve sola. Sin esto, el popup abierto seguiría enseñando la
    * red anterior hasta que alguien lo cerrara y abriera.
    *
-   * (Lo segundo hoy no se sabe provocar a mano: `chrome://extensions` no da
-   * control por host. Ver la comprobación 80. Lo primero pasa igual, y basta
-   * para justificar esto.)
+   * (Lo segundo se provoca desde `chrome://extensions` moviendo Site access a
+   * "On click", que retira todos los permisos a la vez — comprobación 80. No hay
+   * control por host, pero el popup abierto lo nota igual.)
    *
    * Se escucha `chrome.storage.onChanged` y no se añade un mensaje nuevo al
    * contrato: el cambio YA deja huella en storage —es la única fuente de verdad

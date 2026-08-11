@@ -187,20 +187,28 @@ export async function hasPermissionFor(
  * Y EL USUARIO TAMPOCO PUEDE, AL MENOS NO POR HOST
  * ---------------------------------------------------------------------------
  * 🇪🇸 NOTA: la salida obvia —"la wallet no puede, pero el usuario sí desde
- * `chrome://extensions`"— **tampoco existe**. Medido en la Fase 8, segunda
- * tanda: esa pantalla solo ofrece el desplegable de Site access (On click / On
- * specific sites / On all sites) y **ninguna lista de hosts concedidos**. "On
- * specific sites" abre un diálogo para AÑADIR un sitio, no para quitar uno.
+ * `chrome://extensions`"— **no es lo que parece**. Esa pantalla no ofrece
+ * ninguna lista de hosts concedidos: solo el desplegable de Site access (On
+ * click / On specific sites / On all sites), y "On specific sites" abre un
+ * diálogo para AÑADIR un sitio, no para quitar uno.
  *
- * Consecuencia: el estado "red en el catálogo con su permiso revocado" no es
- * alcanzable a mano, y por eso seis comprobaciones manuales de la Fase 8 están
- * marcadas NO EJECUTABLE. No se les ofrece salida a los usuarios en ningún
- * mensaje, porque mandar a buscar algo que no existe es peor que callar.
+ * Lo que ese desplegable sí hace, medido en la comprobación 80 (Chrome Stable,
+ * 10 de agosto de 2026): puesto en "On click" **retiene todos los permisos a la
+ * vez** — los opcionales y también los `host_permissions` del manifest. Es el
+ * disparador conocido del listener de `permissions.onRemoved` de
+ * `background.ts`, y por eso ese listener no es código muerto.
  *
- * Lo que NO está medido —y decide si el listener de `permissions.onRemoved` de
- * `background.ts` es alcanzable siquiera— es si mover ese desplegable a "On
- * click" retira los permisos concedidos. Es la comprobación 80, y está sin
- * correr. No se dé por ninguna de las dos cosas hasta entonces.
+ * ---------------------------------------------------------------------------
+ * RETENER NO ES REVOCAR, Y POR ESO NO ES UN REMEDIO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: en la misma medición, volver a "On all sites" devolvió el permiso
+ * **sin diálogo**. Eso demuestra que el grant nunca se borró: estaba suspendido.
+ *
+ * Importa para el endpoint que mintió (`revokeAfterLie`). Podría parecer que ahí
+ * hay una salida que ofrecerle al usuario —"pon On click"— y no la hay: dejaría
+ * la wallet entera sin permisos, y el del mentiroso volvería intacto al primer
+ * clic, sin preguntar. **Sigue sin existir ninguna forma de ELIMINAR un permiso
+ * concedido**, ni para la wallet ni para el usuario.
  *
  * ---------------------------------------------------------------------------
  * remove() TAMBIÉN PUEDE MENTIR, QUE ES OTRA COSA

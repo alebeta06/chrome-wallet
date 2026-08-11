@@ -252,6 +252,12 @@ la cadena declarada y la que reportó el nodo—. **Y no hay salida que ofrecer:
 Fase 8), así que ni la wallet ni el usuario pueden retirarlo. El mensaje no
 sugiere ninguna, porque mandar a buscar algo que no existe es peor que callar.
 
+El interruptor de Site access **no cuenta como salida**, aunque retire permisos
+(comprobación 80). Los retira todos a la vez y dejaría la wallet inservible, y
+—esto es lo decisivo— **retiene, no borra**: al volver a "On all sites" el
+permiso del mentiroso regresa entero y sin diálogo. Un remedio que rompe todo lo
+demás y encima no arregla lo suyo no es un remedio.
+
 Las cinco filas benignas dejan un **permiso huérfano**: un host alcanzable
 que ninguna red del catálogo usa. Se acepta, y el motivo no es que sea inofensivo
 —que lo es— sino que **la alternativa es peor**. Para recogerlos habría que

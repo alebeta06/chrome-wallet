@@ -72,6 +72,13 @@ Tres piezas concretas, sin cobertura de ningún tipo desde el 10 de agosto de 20
    "no tengo permiso" no se resuelven igual, y fundirlas en un aviso genérico
    deja al usuario sin saber cuál de las dos le pasa.
 
+> **Actualización del 10 de agosto de 2026 — el agujero se cerró en parte.** La
+> comprobación 80 encontró la vía: mover Site access a *On click* retira los
+> permisos, así que las 76 y 77 vuelven a ser ejecutables a mano y esta UI vuelve
+> a tener quien la mire. Lo que sigue faltando es la automatización, que es lo
+> que se pide aquí — y sigue mereciendo la pena por lo de siempre: una
+> comprobación manual se pasa cuando alguien se acuerda.
+
 ### Por qué este agujero es distinto de los otros tres
 
 Los tres de arriba se dejaron sin automatizar **por una decisión**: Playwright es
@@ -88,23 +95,37 @@ comprobación que nadie escribió se escribe; ésta ya estaba escrita y era buen
 así que el trabajo no es diseñarla sino **encontrarle un camino nuevo al mismo
 estado**.
 
-### Un camino candidato, SIN medir
+### Un camino candidato, SIN medir — y sigue haciendo falta
 
 El estado que hace falta es *"red en el catálogo cuyo host no está concedido"*, y
-revocar no es la única forma de llegar: **sembrar el catálogo directamente** con
-una red cuyo host nunca se concedió debería producir el mismo observable, porque
-`unusableChainIds` se deriva en vivo con `contains()` y no se persiste nunca
-(ver `dispatch.ts`). Desde la consola de una página de la extensión, escribir en
-`cc:networks` una entrada con un `rpcUrl` jamás concedido.
+retirar permisos no es la única forma de llegar: **sembrar el catálogo
+directamente** con una red cuyo host nunca se concedió debería producir el mismo
+observable, porque `unusableChainIds` se deriva en vivo con `contains()` y no se
+persiste nunca (ver `dispatch.ts`). Desde la consola de una página de la
+extensión, escribir en `cc:networks` una entrada con un `rpcUrl` jamás concedido.
+
+**La comprobación 80 lo dejó NO URGENTE, no inútil.** El interruptor de Site
+access ya desbloquea las 76 y 77, así que esto ha dejado de ser la única vía. Lo
+que no ha dejado de ser es **la única que aísla UNA red**: el interruptor es todo
+o nada y se lleva por delante Anvil, Sepolia y las de usuario a la vez.
+
+Quién lo necesita, en concreto:
+
+- **La comprobación 59b**, que medía que perder el permiso de una red que **no**
+  era la activa te deja donde estabas. Por el interruptor es irreproducible —la
+  activa cae siempre—, y sin sembrado no tiene camino manual ninguno.
+- **Playwright en esta fase**, con bastante probabilidad: un e2e que mueva un
+  ajuste de `chrome://extensions` está fuera del DOM de la página, exactamente
+  el mismo problema que el diálogo nativo del punto 2. Sembrar storage sí es
+  alcanzable desde un test.
 
 Dos advertencias antes de fiarse:
 
 - **Está sin medir.** Es una deducción a partir de cómo se calcula
   `unusableChainIds`, no una comprobación hecha.
-- **No cubre la transición.** Sirve para los estados estáticos —render, 4902,
-  Restore— pero no ejercita `permissions.onRemoved` ni la caída de la red activa,
-  que es lo que medían la 58 y la 77. Para eso hace falta que la comprobación 80
-  salga que sí.
+- **No cubre la transición.** Da el estado, no el evento: no dispara
+  `permissions.onRemoved` ni la caída de la red activa. Para eso está el
+  interruptor, que ya se midió y sirve.
 
 ---
 

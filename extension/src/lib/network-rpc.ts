@@ -446,12 +446,13 @@ export async function addNetworkFromWallet(
  * eso lleva los cuatro datos: quién lo pidió, la `rpcUrl`, la cadena declarada y
  * la que reportó el nodo. Sin los cuatro no sirve de nada a posteriori.
  *
- * Y no se le ofrece al usuario ninguna salida, porque no la hay: la pantalla de
- * `chrome://extensions` de este Chrome solo tiene el desplegable de Site access
- * —On click / On specific sites / On all sites— y **ninguna lista de hosts
- * concedidos** desde la que quitar uno. Medido en la Fase 8, segunda tanda. Un
- * mensaje que mandara ahí a buscar algo que no existe sería peor que no decir
- * nada.
+ * Y no se le ofrece al usuario ninguna salida, porque no la hay. `chrome://
+ * extensions` no tiene lista de hosts concedidos: solo el desplegable de Site
+ * access. Y ese desplegable **no sirve como remedio** aunque retire permisos
+ * (comprobación 80): los retira TODOS, dejando la wallet inservible, y el del
+ * mentiroso vuelve intacto y sin preguntar al volver a "On all sites" — retiene,
+ * no borra. Ofrecerlo sería vender por solución algo que rompe todo lo demás y
+ * además no resuelve esto.
  *
  * Y la llamada falla IGUAL: no se da de alta una red que mintió solo porque no
  * pudimos limpiar el permiso detrás.
