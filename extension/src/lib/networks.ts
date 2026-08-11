@@ -28,6 +28,33 @@ const ETHER = { name: "Ether", symbol: "ETH", decimals: 18 } as const;
  * arranque del worker — con lo que la migración dejaría de ser idempotente y
  * escribiría en storage cada vez sin que nada hubiera cambiado.
  */
+
+/**
+ * ---------------------------------------------------------------------------
+ * SI EL RPC DE UNA BUILTIN MUERE, SE ARREGLA AQUÍ. NO DÁNDOLA DE ALTA
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: esto ya pasó una vez. Sepolia apuntaba a `sepolia.drpc.org` y el 10
+ * de agosto de 2026 dRPC metió la cadena entera detrás de su plan de pago: los
+ * NUEVE métodos que la wallet usa devolvían *"chain is not available on free
+ * plan"*. Se cambió a `publicnode`, medido en la comprobación 81.
+ *
+ * **La salida NO es reapuntar la red desde la wallet ni desde una dApp.** Eso se
+ * rechaza con -32602 —`upsertNetwork` bloquea las builtin a propósito, para que
+ * una dApp no pueda hacer que "Sepolia" hable con su propio nodo—, así que
+ * intentarlo solo gasta tiempo.
+ *
+ * La salida es **cambiar la `rpcUrl` de aquí abajo y reconstruir**, más el
+ * `host_permissions` de `manifest.ts`, que tiene que casar. Y eso arregla
+ * también los perfiles que ya existen sin borrar storage: `migrateCatalogue`
+ * siembra las builtin PRIMERO y descarta la entrada guardada que reclame el
+ * mismo chainId, así que la definición de este archivo siempre gana sobre lo
+ * persistido. Está en la NOTA de `migrateCatalogue`, al final del archivo.
+ *
+ * Antes de elegir sustituto, medir los nueve métodos y no solo `eth_chainId`:
+ * en la comprobación 81, `1rpc.io/sepolia` pasó ocho y falló exactamente en
+ * `eth_estimateGas`, que es el que hace falta para enviar. Un endpoint así se ve
+ * perfecto —saldos, red, todo— y solo se cae al firmar.
+ */
 export const DEFAULT_NETWORKS: readonly NetworkConfig[] = [
   {
     chainId: ANVIL_CHAIN_ID,
@@ -42,7 +69,7 @@ export const DEFAULT_NETWORKS: readonly NetworkConfig[] = [
   {
     chainId: SEPOLIA_CHAIN_ID,
     name: "Sepolia",
-    rpcUrl: "https://sepolia.drpc.org",
+    rpcUrl: "https://ethereum-sepolia-rpc.publicnode.com",
     symbol: ETHER.symbol,
     explorerUrl: "https://sepolia.etherscan.io",
     builtIn: true,

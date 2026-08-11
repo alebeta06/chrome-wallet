@@ -641,7 +641,7 @@ describe("wallet_getBalances", () => {
     await dispatch(request("wallet_getBalances", [{ addresses: [ANVIL_FIRST] }]), uiSender(), RUNTIME_ID);
 
     expect(reader.mock.calls[0][0].chainId).toBe(SEPOLIA_CHAIN_ID);
-    expect(reader.mock.calls[0][0].rpcUrl).toBe("https://sepolia.drpc.org");
+    expect(reader.mock.calls[0][0].rpcUrl).toBe("https://ethereum-sepolia-rpc.publicnode.com");
   });
 
   /**
@@ -1137,7 +1137,7 @@ describe("eth_getBalance", () => {
 
     await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID);
 
-    expect(reader.mock.calls[0][0].rpcUrl).toBe("https://sepolia.drpc.org");
+    expect(reader.mock.calls[0][0].rpcUrl).toBe("https://ethereum-sepolia-rpc.publicnode.com");
   });
 
   /**
@@ -1931,7 +1931,10 @@ describe("restoring a revoked network, end to end", () => {
    * `unusableChainIds` saldría con Anvil y Sepolia dentro en un escenario donde
    * el usuario no ha tocado nada.
    */
-  const BUILT_IN_PATTERNS = ["http://localhost:8545/*", "https://sepolia.drpc.org/*"];
+  const BUILT_IN_PATTERNS = [
+    "http://localhost:8545/*",
+    "https://ethereum-sepolia-rpc.publicnode.com/*",
+  ];
 
   function grants(...initial: string[]) {
     const held = new Set([...BUILT_IN_PATTERNS, ...initial]);
@@ -2133,7 +2136,7 @@ describe("WalletSnapshot.unusableChainIds", () => {
   });
 
   it("lists the network whose host was revoked", async () => {
-    const snapshot = await snapshotWith(denying("https://sepolia.drpc.org/*"));
+    const snapshot = await snapshotWith(denying("https://ethereum-sepolia-rpc.publicnode.com/*"));
 
     expect(snapshot.unusableChainIds).toEqual([SEPOLIA_CHAIN_ID]);
     // The network stays in the catalogue: it is unusable, not gone.
@@ -2149,7 +2152,7 @@ describe("WalletSnapshot.unusableChainIds", () => {
    */
   it("does not exempt the built-ins", async () => {
     const snapshot = await snapshotWith(
-      denying("http://localhost:8545/*", "https://sepolia.drpc.org/*"),
+      denying("http://localhost:8545/*", "https://ethereum-sepolia-rpc.publicnode.com/*"),
     );
 
     expect(snapshot.unusableChainIds).toEqual([ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID]);

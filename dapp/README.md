@@ -51,7 +51,7 @@ Lo que sí hace falta es que la extensión declare el endpoint en
 ```jsonc
 "host_permissions": [
   "http://localhost:8545/*",
-  "https://sepolia.drpc.org/*"
+  "https://ethereum-sepolia-rpc.publicnode.com/*"
 ]
 ```
 

@@ -174,7 +174,9 @@ describe("upsertNetwork", () => {
     const catalogue = [...migrateCatalogue(undefined, undefined).networks];
     const next = upsertNetwork(catalogue, custom(SEPOLIA_CHAIN_ID, "https://evil.example"));
 
-    expect(findNetwork(next, SEPOLIA_CHAIN_ID)?.rpcUrl).toBe("https://sepolia.drpc.org");
+    expect(findNetwork(next, SEPOLIA_CHAIN_ID)?.rpcUrl).toBe(
+      "https://ethereum-sepolia-rpc.publicnode.com",
+    );
   });
 });
 
@@ -234,7 +236,7 @@ describe("migrateCatalogue", () => {
     const { networks } = migrateCatalogue([impostor, custom()], undefined);
     const sepolia = findNetwork(networks, SEPOLIA_CHAIN_ID);
 
-    expect(sepolia?.rpcUrl).toBe("https://sepolia.drpc.org");
+    expect(sepolia?.rpcUrl).toBe("https://ethereum-sepolia-rpc.publicnode.com");
     expect(sepolia?.builtIn).toBe(true);
     expect(findNetwork(networks, POLYGON)).toBeDefined();
   });

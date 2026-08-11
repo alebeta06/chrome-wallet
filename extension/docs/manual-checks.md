@@ -1852,3 +1852,53 @@ mediciones fuera de su contexto —`remove()` medido en Brave y leído como si f
 Chrome, y el control por host que desapareció sin que ninguna comprobación lo
 notara—, así que ésta nació fechada en vez de que hubiera que reconstruirlo
 después.
+
+## 81. Qué RPC público de Sepolia sirve de verdad (medido)
+
+**Experimento cerrado**, como la 79. Existe porque el endpoint de serie se murió
+en mitad de la fase y hubo que elegir otro — y porque **ésta es la medición de
+esta fase que más rápido caduca**: los planes gratuitos cambian sin avisar. Lleva
+fecha y la lista de métodos probados para que el día que falle se pueda repetir
+en vez de discutirlo de memoria.
+
+**Por qué se prueban NUEVE métodos y no `eth_chainId`.** Porque el modo de fallo
+real no es "el endpoint está caído", es "este método concreto es de pago". Un
+endpoint que responde `eth_chainId` y `eth_getBalance` da una wallet que se ve
+perfecta —red correcta, saldos, todo— y que solo se cae al firmar.
+
+```bash
+for m in eth_chainId eth_blockNumber eth_gasPrice eth_maxPriorityFeePerGas \
+         eth_estimateGas eth_getTransactionCount eth_getBalance \
+         eth_feeHistory eth_getBlockByNumber; do
+  curl -sS --max-time 15 -X POST -H 'content-type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$m\",\"params\":[]}" "$URL"
+done
+```
+
+(Los que llevan parámetros —`eth_estimateGas`, `eth_getBalance`,
+`eth_getTransactionCount`, `eth_feeHistory`, `eth_getBlockByNumber`— con los
+suyos; lo que se mira es si contestan o si devuelven un error de plan.)
+
+**Medido** (curl desde WSL2, **10 de agosto de 2026**):
+
+| Endpoint | Métodos OK | Qué pasa |
+|---|---|---|
+| `ethereum-sepolia-rpc.publicnode.com` | **9/9** | `chainId` `0xaa36a7` ✓, ~350 ms por llamada. **El elegido.** |
+| `1rpc.io/sepolia` | 8/9 | falla **`eth_estimateGas`** — *"not available on free plan"* |
+| `sepolia.drpc.org` | **0/9** | *"chain is not available on free plan"* en todos. Era el de serie. |
+| `rpc.sepolia.org` | 0/9 | timeout a los 15 s |
+
+**Veredicto: `publicnode`**, sin clave. Se descartó Alchemy con API key por algo
+que no es negociable en una extensión: el bundle se descarga y se abre, así que
+una clave dentro no es un secreto — no hay equivalente a la fricción de un
+`NEXT_PUBLIC_*` en un servidor.
+
+> **La trampa de esta medición es `1rpc`.** Pasa ocho de nueve. Si se hubiera
+> mirado solo `eth_chainId` habría salido elegido, y el fallo habría aparecido
+> en la transacción de cierre de fase, delante de la cámara, en el único momento
+> en que no se puede depurar.
+
+**Si publicnode también cae:** no se reapunta Sepolia desde la wallet —se rechaza
+con -32602 por ser builtin—. Se cambia `DEFAULT_NETWORKS` en `src/lib/networks.ts`
+y el `host_permissions` de `src/manifest.ts`, y se reconstruye. Ver la NOTA junto
+a las builtin, que explica por qué eso arregla también los perfiles existentes.

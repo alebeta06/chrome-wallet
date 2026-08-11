@@ -158,7 +158,9 @@ describe("switchChain", () => {
      * permiso para hablar con su nodo".
      */
     it("answers 4902 with a different message for a revoked host", async () => {
-      const { deps } = await setup({ permissions: denying("https://sepolia.drpc.org/*") });
+      const { deps } = await setup({
+        permissions: denying("https://ethereum-sepolia-rpc.publicnode.com/*"),
+      });
 
       const error = await expectRejection(
         switchChain(deps, [{ chainId: SEPOLIA_CHAIN_ID }], METHOD),
@@ -380,7 +382,7 @@ describe("addChain", () => {
       expect(asked).toEqual([]);
 
       const sepolia = findNetwork((await networks.read()).networks, SEPOLIA_CHAIN_ID);
-      expect(sepolia?.rpcUrl).toBe("https://sepolia.drpc.org");
+      expect(sepolia?.rpcUrl).toBe("https://ethereum-sepolia-rpc.publicnode.com");
     });
 
     /** A dApp making sure the network is there before operating. Nothing to decide. */
@@ -396,7 +398,7 @@ describe("addChain", () => {
               ...POLYGON_PARAM,
               chainId: SEPOLIA_CHAIN_ID,
               chainName: "Sepolia",
-              rpcUrls: ["https://sepolia.drpc.org"],
+              rpcUrls: ["https://ethereum-sepolia-rpc.publicnode.com"],
             },
           ],
           FROM,

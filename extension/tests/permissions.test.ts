@@ -10,7 +10,7 @@ import {
 } from "@/lib/permissions";
 
 const ANVIL = "http://localhost:8545";
-const SEPOLIA = "https://sepolia.drpc.org";
+const SEPOLIA = "https://ethereum-sepolia-rpc.publicnode.com";
 
 /** A port that holds exactly the patterns it was built with. */
 function portHolding(...granted: string[]): PermissionsPort {

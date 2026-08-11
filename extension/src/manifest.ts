@@ -47,7 +47,7 @@ const manifest: chrome.runtime.ManifestV3 = {
   permissions: ["storage", "tabs", "notifications"],
 
   /** Local Anvil node and the public Sepolia endpoint. Nothing else. */
-  host_permissions: ["http://localhost:8545/*", "https://sepolia.drpc.org/*"],
+  host_permissions: ["http://localhost:8545/*", "https://ethereum-sepolia-rpc.publicnode.com/*"],
 
   /**
    * Hosts the wallet can ASK for at runtime, when the user adds a network.
