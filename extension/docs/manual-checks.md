@@ -1033,43 +1033,47 @@ deja de mirar.
 
 Recarga la extensión antes de empezar: el manifest cambió (`optional_host_permissions`).
 
-## ⚠️ Revocar un host a mano no existe — seis comprobaciones NO EJECUTABLES
+## ⚠️ Cómo se quita un permiso de host: el interruptor, y es TODO o NADA
 
-**Medido** (Chrome actual, extensión unpacked, 10 de agosto de 2026):
-`chrome://extensions` → CodeCrypto Wallet → Details → **Site access** ofrece
-únicamente un desplegable —*On click* / *On specific sites* / *On all sites*—.
-**No hay lista de hosts concedidos ni forma de quitar uno individual.** "On
-specific sites" abre un diálogo para **añadir** un sitio, no para quitarlo.
+Seis comprobaciones de esta fase (58, 59, 61b, 66, 76, 77) necesitan una red del
+catálogo cuyo permiso no esté concedido. **No se llega quitando un host**, se
+llega con un interruptor global. Léelo antes de intentar ninguna de las seis.
 
-Y la wallet tampoco puede revocar por código (comprobación 79). Con las dos vías
-cerradas, el estado **"red en el catálogo con su permiso revocado" es
-inalcanzable**, y con él todas las comprobaciones que empiezan por *"quita X
-desde `chrome://extensions`"*.
+**Lo que NO existe** (medido el 10 de agosto de 2026): `chrome://extensions` →
+CodeCrypto Wallet → Details → **Site access** ofrece solo un desplegable —*On
+click* / *On specific sites* / *On all sites*— y **ninguna lista de hosts
+concedidos**. "On specific sites" abre un diálogo para **añadir** un sitio, no
+para quitarlo. Por código tampoco: `remove()` lanza siempre (comprobación 79).
 
-| # | Qué medía | Qué la cubre ahora |
-|---|---|---|
-| 58 | la red activa cae sola y se anuncia | `network-store.test.ts` → *moves to the default network and announces it* |
-| 59 | red no usable pero **no** borrada, sin `chainChanged` | `dispatch.test.ts` → *lists the network whose host was revoked* |
-| 61(b) | el 4902 con mensaje de permiso revocado | `network-rpc.test.ts` → *answers 4902 with a different message for a revoked host* |
-| 66 | el ciclo revocar → 4902 → reconceder | `network-rpc.test.ts` → *recovers a revoked network through addEthereumChain* |
-| 76 | marcada, con botón Restore, y vuelve | `dispatch.test.ts` → *walks revoke → marked unusable → restore → usable again* |
-| 77 | la red **activa** sin acceso | mismo test que 76, más el de la 58 |
+**Lo que SÍ funciona** (comprobación 80): mover el desplegable a **On click**
+retira los permisos concedidos. Y retira **todos** — los opcionales y también los
+`host_permissions` declarados en el manifest.
 
-**Lo que se queda sin cubrir por nadie**, y conviene saberlo: la parte de la 76 y
-la 77 que es **render** —la fila atenuada y tachada, el chip `no access`, el
-botón *Restore* con los campos bloqueados, y el aviso separado del banner de
-saldos—. No hay tests de componente en el proyecto. Esa UI se escribió mirándola
-una vez y hoy no la mira nadie más.
+Tres consecuencias que cambian cómo se lee cada una de las seis:
 
-**No se borran.** Si Chrome recupera esa pantalla, vuelven a servir tal cual. Lo
-que no vale es dejarlas escritas como si se pudieran pasar: una comprobación que
-no se puede ejecutar y no lo dice acaba contándose como pasada.
+1. **No se puede aislar una red.** Al mover el interruptor se van Anvil, Sepolia
+   y las de usuario a la vez. Toda comprobación escrita como "quita el host de X
+   y mira que Y no se entera" hay que releerla: no queda ninguna Y con permiso.
+2. **La red activa siempre cae**, porque también pierde el suyo. Así que
+   `chainChanged` va a llegar en todos los casos, incluso cuando la comprobación
+   original decía que no debía llegar.
+3. **Es reversible y silencioso.** Volver a *On all sites* devuelve los permisos
+   **sin diálogo**. Cómodo para encadenar comprobaciones — y ver más abajo por
+   qué es también lo que impide usarlo como remedio de seguridad.
 
-> **Queda una vía sin medir**, y decide bastante: mover el desplegable de Site
-> access a *On click*. Si eso retira los permisos concedidos, casi todas estas
-> vuelven —reescritas para "todas las redes a la vez" en vez de "un host"— y el
-> listener de `permissions.onRemoved` de `background.ts` resulta alcanzable. Si
-> no los retira, ese listener es código muerto. Es la **comprobación 80**.
+> **Retener no es revocar, y la diferencia importa.** Que el permiso vuelva sin
+> diálogo demuestra que el grant **nunca se borró**: solo estaba suspendido. Por
+> eso esto no sirve para deshacerse del permiso de un endpoint que mintió
+> (comprobación 64) — lo suspendería junto con todos los demás y volvería entero
+> al primer clic. Sigue sin haber forma de **eliminar** un permiso concedido.
+
+**Para volver al estado normal** al terminar cualquiera de las seis: Site access
+→ *On all sites*. Compruébalo antes de seguir con otra comprobación, o arrastras
+una wallet sin permisos a la siguiente y no entenderás nada:
+
+```js
+await chrome.permissions.contains({ origins: ["http://localhost:8545/*"] })  // true
+```
 
 ## 56. Cuánto cuesta de verdad `contains()`
 
@@ -1113,7 +1117,14 @@ umbral de 1 ms se queda escrito: si un día el catálogo crece mucho o Chrome
 cambia el coste, vuelve a correr el snippet y compara contra este número en vez
 de contra una intuición.
 
-## 57. Las builtin salen usables en un perfil normal
+## 57. Las builtin salen usables — con Site access en "On all sites"
+
+> **Precondición, y no es una formalidad:** `chrome://extensions` → Details →
+> **Site access** tiene que estar en **On all sites**. Con el desplegable en *On
+> click* el resultado esperado de abajo es **falso**, y no por un bug: la
+> comprobación 80 midió que ese ajuste retira **también** los `host_permissions`
+> declarados en el manifest, así que las dos builtin salen como no usables.
+> Compruébalo antes de dar por rota ninguna otra cosa.
 
 ```js
 await chrome.runtime.sendMessage({
@@ -1140,20 +1151,28 @@ tratar los dos casos igual.
 > restringir el acceso a sitios de una extensión desde su tarjeta ("On click" /
 > "On specific sites"), y si eso también retira los `host_permissions`
 > declarados, las dos builtin aparecerían como no usables sin que el usuario
-> haya tocado ningún permiso de red. Si el array no sale vacío, **para**: la
-> lógica de `unusableChainIds` necesita distinguir retirada de revocada.
+> haya tocado ningún permiso de red.
 
-## 58. Revocar el host de la red activa
+**Pregunta contestada** (comprobación 80, 10 de agosto de 2026): **sí los
+retira.** Con Site access en *On click*, `unusableChainIds` devolvió las tres
+redes, Anvil y Sepolia incluidas.
 
-> **NO EJECUTABLE en este Chrome.** Requiere quitar un host a mano y esa
-> pantalla no existe — ver «Revocar un host a mano no existe» al principio de
-> la Fase 8, con el test que la cubre.
+Lo que esta comprobación decidió de forma provisional —que
+`unusableChainIds` **no** necesita distinguir "retirado por site access" de
+"revocado", y que el listener de `onRemoved` puede tratar los dos casos igual—
+queda confirmado por el mismo camino: la wallet reaccionó a la retirada
+exactamente como a una revocación (cayó a la red por defecto, marcó las tres,
+avisó en el worker) y el comportamiento fue el correcto. **Distinguirlas habría
+sido código de más para una diferencia que no se nota desde aquí.**
+
+## 58. La red activa se queda sin permiso
 
 1. Añade Sepolia como red activa: `wallet_setActiveNetwork` con `0xaa36a7`, o el
-   selector cuando exista.
+   selector.
 2. Abre la dApp y conéctala. Deja la pestaña abierta con la consola visible.
-3. En `chrome://extensions` → CodeCrypto Wallet → **Details** → Site access,
-   quita `sepolia.drpc.org`.
+3. En `chrome://extensions` → CodeCrypto Wallet → **Details** → **Site access**,
+   mueve el desplegable a **On click**. Ver el aviso del principio de la fase:
+   esto retira **todos** los permisos, no solo el de Sepolia.
 
 Esperado, las tres cosas:
 
@@ -1165,17 +1184,55 @@ El tercero es el que importa. Sin él, la dApp se queda creyendo que está en
 Sepolia mientras la wallet firmaría en Anvil — la misma desincronización que la
 comprobación de deriva de chainId cierra desde el otro lado.
 
-## 59. Revocar un host que no es el de la red activa
+> **Y fíjate en el destino: Anvil TAMPOCO tiene permiso ya.** La wallet se mueve
+> igual, y es lo correcto: moverse a una red por defecto que también está sin
+> acceso sigue siendo mejor que quedarse en una que el usuario cree activa. Lo
+> fija `network-store.test.ts` → *moves to the default even when the default is
+> unusable too*. Si la wallet se quedara quieta por "no hay a dónde ir", eso sí
+> sería un bug.
 
-> **NO EJECUTABLE en este Chrome.** Requiere quitar un host a mano y esa
-> pantalla no existe — ver «Revocar un host a mano no existe» al principio de
-> la Fase 8, con el test que la cubre.
+Al terminar: Site access → *On all sites*.
 
-Con Anvil activo, revoca el host de Sepolia.
+## 59. Una red sin acceso no es una red borrada
 
-Esperado: `unusableChainIds` incluye `0xaa36a7`, la red **sigue** en `networks`,
-y **no** se emite `chainChanged`. Una red no usable no es una red borrada, y
-revocar algo que no estabas usando no te mueve de sitio.
+Esta comprobación medía **dos** cosas y la vía nueva solo alcanza una. Se parte,
+en vez de dejarla escrita como si siguiera entera.
+
+### 59a. Sin acceso ≠ borrada — SE COMPRUEBA
+
+En el mismo movimiento de la 58 (Site access → *On click*), sin deshacerlo:
+
+```js
+await chrome.runtime.sendMessage({
+  type: 'CODECRYPTO_RPC', id: crypto.randomUUID(),
+  method: 'wallet_getState', params: [],
+}).then((r) => ({ unusable: r.result.unusableChainIds, hay: r.result.networks.length }))
+```
+
+Esperado: `unusableChainIds` trae **las tres** —`0x7a69`, `0xaa36a7` y `0x53a`—
+y `networks` **sigue teniendo las tres**. Ninguna desaparece del catálogo por
+haberse quedado sin permiso. Es la mitad que importaba para la UI: una red no
+usable se marca, no se borra, porque borrarla mandaría al usuario a añadir otra
+vez algo que ya tiene.
+
+### 59b. "Revocar lo que no usabas no te mueve" — NO ALCANZABLE
+
+Medía que perder el permiso de una red que **no** era la activa te dejaba donde
+estabas, sin `chainChanged`. Por esta vía es imposible: el interruptor es global,
+la red activa pierde el suyo **siempre**, y el `chainChanged` llega **siempre**.
+No queda ninguna red "otra" que conserve permiso para comparar.
+
+Y no es que falte una variante más lista: **la propiedad requiere retirar un
+permiso y no otro**, que es exactamente lo que Chrome ya no deja hacer.
+
+Qué la cubre mientras tanto:
+
+- `dispatch.test.ts` → *lists the network whose host was revoked*, que fija que
+  la red se marca sin salir del catálogo.
+- Y para reproducirlo **a mano**, la única vía sería sembrar `cc:networks` con
+  una red cuyo host nunca se concedió mientras la activa conserva el suyo — el
+  camino candidato del punto 4 de `e2e-backlog.md`, que sigue **sin medir**. Es
+  el único que aísla UNA red, y por eso no se ha borrado del backlog.
 
 ## 60. Cambiar de red desde una dApp
 
@@ -1210,13 +1267,9 @@ await provider.request({
 
 Esperado: **4902**, y el mensaje menciona `wallet_addEthereumChain`.
 
-> **El apartado (b) es NO EJECUTABLE en este Chrome**: no hay forma de quitar
-> el host a mano. El (a) se pasa con normalidad. Ver «Revocar un host a mano no
-> existe» al principio de la Fase 8.
-
 ```js
-// b) una red que SÍ está, con el permiso revocado
-// (inalcanzable: requeriría quitar sepolia.drpc.org a mano)
+// b) una red que SÍ está, sin permiso
+// primero: Site access → "On click" (retira TODOS, ver el aviso de la fase)
 await provider.request({
   method: 'wallet_switchEthereumChain',
   params: [{ chainId: '0xaa36a7' }],
@@ -1368,17 +1421,14 @@ nodo obligaría a pasar otra vez por el diálogo nativo entero. Que hoy esa
 decisión no pueda ejecutarse no la borra — sigue siendo la decisión correcta, y
 es la que se ve en el código y en los tests.
 
-## 66. Reconceder una red revocada
-
-> **NO EJECUTABLE en este Chrome.** Requiere quitar un host a mano y esa
-> pantalla no existe — ver «Revocar un host a mano no existe» al principio de
-> la Fase 8, con el test que la cubre.
+## 66. Reconceder una red sin acceso
 
 El ciclo completo, que es el que un atajo de idempotencia habría roto:
 
 1. Añade Anvil Two (comprobación 63) y cambia a ella con
    `wallet_switchEthereumChain`.
-2. En `chrome://extensions` → Site access, quita `localhost:8546`.
+2. `chrome://extensions` → **Site access** → **On click**. Retira todos los
+   permisos, no solo el de Anvil Two.
 3. La wallet cae a Anvil sola y la dApp recibe `chainChanged` (comprobación 58).
 4. `wallet_switchEthereumChain` a `0x53a` → **4902** mencionando
    `wallet_addEthereumChain`.
@@ -1386,11 +1436,20 @@ El ciclo completo, que es el que un atajo de idempotencia habría roto:
    comprobación 63.
 
 Esperado en el paso 5: **se abre una ventana** que dice *"restore access"*, no un
-`null` silencioso. Tras aprobar y reconceder el permiso, el `switch` del paso 4
-funciona.
+`null` silencioso.
 
 > Si el paso 5 devuelve `null` sin abrir nada, el consejo del 4902 no lleva a
-> ninguna parte y la red queda inalcanzable para siempre desde la dApp.
+> ninguna parte y la red queda inalcanzable para siempre desde la dApp. **Ésa es
+> la aserción de esta comprobación**, y no depende de nada de Chrome: es lógica
+> de la wallet decidiendo que un alta con el permiso ausente no es idempotente.
+
+⚠️ **Lo que pasa DESPUÉS de aprobar está sin medir.** Con Site access en *On
+click* los permisos están retenidos globalmente, y no sabemos si un
+`chrome.permissions.request()` desde la ventana los recupera, si el diálogo sale
+siquiera, o si Chrome lo ignora mientras el interruptor siga ahí. Anota lo que
+veas; **si el permiso no vuelve, no lo des por un bug de la wallet** sin mirar
+antes si el interruptor lo estaba impidiendo. Distinguirlo es fácil: devuelve
+Site access a *On all sites* y mira si entonces el `switch` del paso 4 funciona.
 
 ## 67. Dos altas a la vez con RPC distinto
 
@@ -1576,13 +1635,15 @@ Prueba también los tres rechazos, y lee los mensajes como si no supieras nada:
 
 ## 76. Una red sin acceso: marcada, y con salida
 
-> **NO EJECUTABLE en este Chrome.** Requiere quitar un host a mano y esa
-> pantalla no existe — ver «Revocar un host a mano no existe» al principio de
-> la Fase 8, con el test que la cubre.
-
-1. Con Anvil Two añadida y **Anvil de serie** como red activa, revoca
-   `localhost:8546` desde `chrome://extensions`.
+1. Con Anvil Two añadida y **Anvil de serie** como red activa, mueve Site access
+   a **On click**.
 2. Abre el popup.
+
+> **Van a salir marcadas las TRES, no solo Anvil Two.** El interruptor es global
+> (ver el aviso del principio de la fase), así que Anvil y Sepolia aparecen
+> igual. No es un fallo del render: es que de verdad no hay permiso para
+> ninguna. Lo que se está mirando aquí es **cómo se marca una fila**, y da lo
+> mismo que sean tres que una.
 
 Esperado:
 
@@ -1599,16 +1660,21 @@ permiso y la red vuelve a ser usable, sin haber tenido que escribir nada.
 
 ## 77. La red activa se queda sin acceso
 
-> **NO EJECUTABLE en este Chrome.** Requiere quitar un host a mano y esa
-> pantalla no existe — ver «Revocar un host a mano no existe» al principio de
-> la Fase 8, con el test que la cubre.
-
 Repite la 76 pero con **Anvil Two como red activa**.
 
 Esperado: la wallet cae a Anvil sola y la dApp recibe `chainChanged`
 (comprobación 58), y el popup enseña arriba el aviso de que ya no puede alcanzar
 esa red — separado del banner de saldos, porque "no llego al nodo" y "me quitaste
 el permiso" tienen arreglos distintos.
+
+> **El aviso tiene que salir aunque el destino tampoco tenga permiso.** Por esta
+> vía la wallet cae a Anvil y Anvil está igual de inalcanzable, así que el popup
+> queda enseñando una red activa sin acceso. Si en ese estado el aviso NO
+> aparece, es un bug: sería justo el caso en que el usuario más necesita que le
+> digan por qué no llegan los saldos.
+
+Al terminar: Site access → *On all sites*, y comprueba que vuelven los permisos
+antes de seguir con la 78.
 
 ## 78. Una dApp cambia la red con el popup abierto
 
@@ -1726,34 +1792,49 @@ Esperado si no sirve: `contains()` sigue en `true` y no pasa nada en el worker.
 Prueba también el camino inverso —volver a *On all sites*— y mira si
 `contains()` regresa a `true` sin diálogo.
 
-> **Lo que decide.** Si retira: las seis vuelven, reescritas para *"todas las
-> redes a la vez"* en vez de *"un host"*, porque el desplegable no distingue. La
-> 59 en particular habría que replantearla entera: medía que revocar un host que
-> **no** era el de la red activa no te mueve de sitio, y por esta vía se van
-> todos a la vez, así que no queda un host "otro" que revocar.
+> **Qué decidía, y cómo cayó.** Salió que **sí retira**, así que las seis
+> volvieron, reescritas para *"todas las redes a la vez"*. La única que no se
+> pudo recuperar entera es la 59: su mitad (b) medía que perder el permiso de una
+> red que **no** era la activa te deja donde estabas, y por esta vía la activa
+> cae siempre. Está partida en 59a (se comprueba) y 59b (no alcanzable), en vez
+> de dejarla escrita como si siguiera entera.
+>
+> La otra rama —que no retirase— traía la regla de no borrar el listener de
+> `onRemoved` en la misma tanda, sino marcarlo y decidirlo aparte. No hizo falta,
+> pero la regla se queda escrita: llevamos dos casos en esta fase —el spike de
+> Brave y la revocación a mano— en los que una medición se dio por concluyente
+> antes de tiempo. Borrar código de seguridad con una medición recién hecha es el
+> movimiento que esta fase ha enseñado a no hacer.
 
-> ⚠️ **Y si sale que NO retira: no se borra el listener en la misma tanda.** Se
-> marca como no alcanzable, con esta medición al lado, y se decide aparte.
-> Borrar código de seguridad a la primera medición es exactamente el movimiento
-> que esta fase ha enseñado a no hacer: llevamos dos casos —el spike de Brave y
-> la revocación a mano— en los que una medición se dio por concluyente antes de
-> tiempo. Una tercera no.
+### Resultado
 
-### El resultado se anota aquí, con fecha y navegador
-
-Sin excepción, salga lo que salga. En esta fase ya han viajado **dos** mediciones
-fuera de su contexto —`remove()` medido en Brave y leído como si fuera Chrome, y
-el control por host que dejó de existir sin que ninguna comprobación lo notara—,
-así que ésta nace fechada. Rellenar tal cual:
+**Medido** (Chrome canal Stable, perfil de desarrollo, extensión unpacked,
+**10 de agosto de 2026**). Anvil Two en el catálogo y como red **activa**:
 
 ```
-**Medido** (navegador y versión, perfil, fecha):
-
-  baseline contains()            → ?
-  tras mover a "On click"        → ?
-  ¿aviso en el service worker?   → ?
-  unusableChainIds               → ?
-  al volver a "On all sites"     → ?
-
-**Veredicto:** …
+  baseline contains()          → true
+  tras mover a "On click"      → false
+  aviso en el service worker   → "a revoked host permission moved the
+                                  wallet to 0x7a69"
+  unusableChainIds             → ["0x7a69", "0xaa36a7", "0x53a"]
+  al volver a "On all sites"   → true, sin diálogo
 ```
+
+**Veredicto: la vía sirve, y es reversible.** Tres cosas quedan fijadas:
+
+1. **`permissions.onRemoved` no es código muerto.** Tiene disparador conocido y
+   se dispara — el aviso del worker lo prueba.
+2. **"On click" retira también los `host_permissions` declarados**, no solo los
+   opcionales: en `unusableChainIds` salieron las tres redes, incluidas Anvil y
+   Sepolia, que están en el manifest. Esto **contesta la pregunta que la
+   comprobación 57 dejó abierta**, y la 57 lleva ahora su precondición.
+3. **Retener no es revocar.** El permiso volvió **sin diálogo**, lo que
+   demuestra que el grant nunca se borró: estaba suspendido. Sigue sin existir
+   ninguna forma de **eliminar** un permiso concedido — ni para la wallet
+   (comprobación 79) ni para el usuario.
+
+La fecha y el navegador van arriba a propósito. En esta fase ya han viajado dos
+mediciones fuera de su contexto —`remove()` medido en Brave y leído como si fuera
+Chrome, y el control por host que desapareció sin que ninguna comprobación lo
+notara—, así que ésta nació fechada en vez de que hubiera que reconstruirlo
+después.
