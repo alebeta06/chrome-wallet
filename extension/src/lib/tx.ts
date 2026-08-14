@@ -16,6 +16,21 @@ import {
 import { ProviderError, invalidParams } from "./errors";
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * Shape only: 0x and forty hex digits. NO EIP-55 checksum.
+ *
+ * 🇪🇸 NOTA: comprobar el checksum necesita keccak, o sea ethers, y esto lo acaba
+ * importando `validators.ts`, que importa la UI. La regla del proyecto es que
+ * ethers no entra en el bundle del popup, así que se valida la forma y el
+ * checksum se queda sin comprobar. Es una decisión, no un olvido: una dirección
+ * con el checksum mal escrito sigue siendo una dirección válida a nivel de
+ * protocolo, y hoy ninguna pantalla de esta wallet pide escribir una a mano —el
+ * destino de una transferencia interna es un desplegable.
+ */
+export function isValidAddress(value: unknown): value is Address {
+  return typeof value === "string" && ADDRESS.test(value);
+}
 const HEX_QUANTITY = /^0x[0-9a-fA-F]+$/;
 const HEX_DATA = /^0x([0-9a-fA-F]{2})*$/;
 
@@ -106,7 +121,7 @@ export function parseTransactionRequest(
 
   // ---- from -------------------------------------------------------------
   if (tx.from !== undefined) {
-    if (typeof tx.from !== "string" || !ADDRESS.test(tx.from)) {
+    if (!isValidAddress(tx.from)) {
       throw invalidParams('"from" must be a 20-byte hex address.');
     }
     if (tx.from.toLowerCase() !== authorisedAccount.toLowerCase()) {
@@ -129,7 +144,7 @@ export function parseTransactionRequest(
       'A "to" address is required. This wallet does not support contract deployment.',
     );
   }
-  if (typeof tx.to !== "string" || !ADDRESS.test(tx.to)) {
+  if (!isValidAddress(tx.to)) {
     throw invalidParams('"to" must be a 20-byte hex address.');
   }
 

@@ -138,6 +138,18 @@ const MAX_CHAIN_ID = BigInt(Number.MAX_SAFE_INTEGER);
  *
  * El 0 se rechaza porque no es una red. Del techo se habla en MAX_CHAIN_ID.
  */
+/**
+ * A network needs a name a human can read. Whitespace is not one.
+ *
+ * 🇪🇸 NOTA: estaba escrito inline en `sanitizeEntry` y ahora lo usan dos sitios
+ * —ése y `validators.ts`—, así que pasa a ser una función. Dos copias de la
+ * misma regla es la vía rápida a que el formulario acepte lo que la migración
+ * descarta, o al revés, sin que nada falle.
+ */
+export function isValidNetworkName(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export function canonicalChainId(value: unknown): Hex | null {
   if (typeof value !== "string" || !HEX_CHAIN_ID.test(value)) return null;
 
@@ -379,7 +391,7 @@ function sanitizeEntry(raw: unknown): NetworkConfig | null {
   const chainId = canonicalChainId(candidate.chainId);
   if (chainId === null) return null;
 
-  if (typeof candidate.name !== "string" || candidate.name.trim().length === 0) return null;
+  if (!isValidNetworkName(candidate.name)) return null;
   if (typeof candidate.rpcUrl !== "string" || candidate.rpcUrl.length === 0) return null;
 
   /**
