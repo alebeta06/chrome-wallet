@@ -72,18 +72,35 @@ export function createSerializer(): Serializer {
   let chain: Promise<unknown> = Promise.resolve();
 
   return <T>(task: () => Promise<T>): Promise<T> => {
-    /**
-     * 🇪🇸 NOTA: `task` va en las DOS ramas del `then`. Si solo fuera en la de
-     * éxito, una tarea que falla dejaría la cadena rechazada para siempre y
-     * ninguna escritura posterior volvería a ejecutarse — un fallo transitorio
-     * al escribir dejaría la wallet sin poder guardar nada más.
-     */
-    const next = chain.then(task, task);
+    const next = chain.then(task);
 
     /**
-     * 🇪🇸 NOTA: la cadena guarda la versión NEUTRALIZADA y el llamador se lleva
-     * `next` tal cual. Así el error llega a quien lo pidió, y a la vez no queda
-     * un rechazo sin manejar colgando de la cadena interna.
+     * ------------------------------------------------------------------------
+     * ESTA LÍNEA ES LA QUE SOSTIENE "UN FALLO NO ATASCA LA CADENA"
+     * ------------------------------------------------------------------------
+     * 🇪🇸 NOTA: la cadena guarda la versión NEUTRALIZADA, así que `chain` NUNCA
+     * está rechazada y la tarea siguiente siempre arranca. El llamador se lleva
+     * `next` tal cual, con su rechazo intacto: el error llega a quien lo pidió.
+     *
+     * Sin esto, una escritura que falla dejaría `chain` rechazada para siempre y
+     * ninguna posterior volvería a ejecutarse — la wallet dejaría de guardar en
+     * silencio. Lo fija el test "keeps going after a task fails", y ese test se
+     * pone rojo si se quita esta línea. Compruébalo antes de tocarla.
+     *
+     * Aquí hubo además un `chain.then(task, task)`: pasar la tarea también por
+     * la rama de rechazo conseguía lo mismo por otro camino. Se quitó porque los
+     * dos mecanismos juntos hacían a los dos INSABOTEABLES — con `.catch()`
+     * puesto, `chain` no rechaza nunca y la segunda rama era inalcanzable; con
+     * la rama doble puesta, quitar el `.catch()` no rompía nada. Medido: la
+     * suite entera (703) seguía verde quitando cualquiera de los dos por
+     * separado. Un trozo que ningún test puede falsar no está protegido, solo
+     * parece estarlo.
+     *
+     * Se conservó `.catch()` y no la otra porque hace lo mismo MÁS una cosa: un
+     * llamador que ignore la promesa devuelta —`void serialize(…)`— no deja un
+     * rechazo sin recoger. Medido en Node: 0 `unhandledRejection` con `.catch()`,
+     * 1 con la rama doble. Hoy no se alcanza —los nueve puntos de uso hacen
+     * `return serialize(…)`— así que es un seguro, no un arreglo.
      */
     chain = next.catch(() => undefined);
 
