@@ -160,6 +160,7 @@ const NO_APPROVALS: ApprovalCoordinator = {
   settle: () => Promise.resolve(),
   reject: () => Promise.resolve(),
   read: () => Promise.resolve(null),
+  focusWindow: () => Promise.resolve(),
 };
 
 const NO_EMIT: EventEmitter = () => Promise.resolve();

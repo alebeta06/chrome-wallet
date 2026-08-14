@@ -253,6 +253,7 @@ function approver(outcome: "approve" | "reject") {
     settle: async () => {},
     reject: async () => {},
     read: async () => null,
+    focusWindow: () => Promise.resolve(),
   };
 
   return { approvals, asked };

@@ -1,12 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ErrorCode, type PendingRequest, type RequestId } from "@/types/messages";
+import {
+  ErrorCode,
+  ProviderErrors,
+  type PendingRequest,
+  type RequestId,
+} from "@/types/messages";
 import {
   createApprovalCoordinator,
   type ApprovalCoordinator,
   type ApprovalWindows,
 } from "@/lib/approvals";
 import { ProviderError } from "@/lib/errors";
+import type { Notifier } from "@/lib/notifications";
 import { createWalletStorage } from "@/lib/storage";
 import { createMemoryStorageArea } from "./helpers/memory-storage-area";
 
@@ -23,6 +29,7 @@ function setup(options: { timeoutMs?: number; failOpen?: boolean } = {}) {
   const area = createMemoryStorageArea();
   const opened: RequestId[] = [];
   const closed: number[] = [];
+  const focused: number[] = [];
   let clock = 1_000;
   let nextWindowId = 100;
 
@@ -35,11 +42,27 @@ function setup(options: { timeoutMs?: number; failOpen?: boolean } = {}) {
     close: vi.fn(async (windowId) => {
       closed.push(windowId);
     }),
+    focus: vi.fn(async (windowId) => {
+      focused.push(windowId);
+    }),
+  };
+
+  const announced: Array<{ requestId: RequestId; kind: string }> = [];
+  const dismissed: RequestId[] = [];
+
+  const notifier: Notifier = {
+    announce: vi.fn(async (requestId, kind) => {
+      announced.push({ requestId, kind });
+    }),
+    dismiss: vi.fn(async (requestId) => {
+      dismissed.push(requestId);
+    }),
   };
 
   const coordinator = createApprovalCoordinator({
     storage: createWalletStorage(area),
     windows,
+    notifier,
     now: () => clock,
     ...(options.timeoutMs === undefined
       ? {}
@@ -51,6 +74,9 @@ function setup(options: { timeoutMs?: number; failOpen?: boolean } = {}) {
     windows,
     opened,
     closed,
+    focused,
+    announced,
+    dismissed,
     coordinator,
     advance: (ms: number) => {
       clock += ms;
@@ -487,7 +513,7 @@ describe("requestSignature", () => {
     const area = createMemoryStorageArea();
     const coordinator = createApprovalCoordinator({
       storage: createWalletStorage(area),
-      windows: { open: async () => 1, close: async () => {} },
+      windows: { open: async () => 1, close: async () => {}, focus: async () => {} },
       now: () => 1_000,
     });
 
@@ -818,5 +844,166 @@ describe("add-chain deduplication", () => {
     });
 
     await expect(pending).rejects.toBeInstanceOf(ProviderError);
+  });
+});
+
+// ============================================================================
+// Phase 9 — the desktop toast
+// ============================================================================
+
+describe("the notification", () => {
+  it("announces a brand new request, once", async () => {
+    const { coordinator, announced } = setup();
+
+    void coordinator.requestConnect(CONNECT);
+    await flush();
+
+    expect(announced).toHaveLength(1);
+    expect(announced[0]?.kind).toBe("connect");
+  });
+
+  /**
+   * 🇪🇸 NOTA: un duplicado se engancha a la solicitud viva y nunca llega a abrir
+   * ventana, así que tampoco vuelve a avisar. Dos toasts para la misma pregunta
+   * harían pensar que hay dos cosas esperando.
+   */
+  it("does not announce a duplicate that joined a live request", async () => {
+    const { coordinator, announced } = setup();
+
+    void coordinator.requestConnect(CONNECT);
+    void coordinator.requestConnect(CONNECT);
+    await flush();
+
+    expect(announced).toHaveLength(1);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * SETTLED IS SETTLED, AND THE TOAST GOES WITH IT
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: sin esto quedan avisos en pantalla de operaciones ya firmadas. El
+   * id tiene que ser EL SUYO: cerrar el de otra solicitud dejaría el propio
+   * puesto y quitaría uno que sí esperaba.
+   */
+  it("clears the toast with its own id when the user approves", async () => {
+    const { coordinator, dismissed, pending } = setup();
+
+    void coordinator.requestConnect(CONNECT);
+    await flush();
+    const [requestId] = Object.keys(pending());
+
+    await coordinator.settle(requestId as RequestId, {
+      type: "CODECRYPTO_DECISION",
+      requestId: requestId as RequestId,
+      kind: "connect",
+      approved: true,
+      accountIndex: 0,
+    });
+
+    expect(dismissed).toEqual([requestId]);
+  });
+
+  it("clears the toast when the request is rejected", async () => {
+    const { coordinator, dismissed, pending } = setup();
+
+    const waiting = coordinator.requestConnect(CONNECT).catch(() => undefined);
+    await flush();
+    const [requestId] = Object.keys(pending());
+
+    await coordinator.reject(requestId as RequestId, ProviderErrors.userRejected());
+    await waiting;
+
+    expect(dismissed).toEqual([requestId]);
+  });
+
+  /**
+   * 🇪🇸 NOTA: `closeWindow` no hace nada sin `windowId`, y la notificación existe
+   * igualmente — se dispara al presentar, no al registrar la ventana. Si el
+   * `clear` colgara del cierre de ventana, este caso dejaría el aviso para
+   * siempre.
+   */
+  it("clears the toast even when there was no window to close", async () => {
+    const { coordinator, dismissed, area, closed } = setup();
+
+    void coordinator.requestConnect(CONNECT).catch(() => undefined);
+    await flush();
+    const [requestId] = Object.keys(
+      (area.snapshot()["cc:pendingRequests"] as Record<RequestId, PendingRequest>) ?? {},
+    );
+
+    // The worker died before attachWindow landed: the request has no windowId.
+    const stored = (area.snapshot()["cc:pendingRequests"] as Record<RequestId, PendingRequest>)[
+      requestId as RequestId
+    ];
+    const { windowId: _dropped, ...withoutWindow } = stored;
+    await area.set({ "cc:pendingRequests": { [requestId as RequestId]: withoutWindow } });
+
+    await coordinator.reject(requestId as RequestId, ProviderErrors.userRejected());
+
+    expect(dismissed).toEqual([requestId]);
+    expect(closed).toEqual([]);
+  });
+});
+
+describe("clicking the notification", () => {
+  it("focuses the window that is already open", async () => {
+    const { coordinator, focused, pending } = setup();
+
+    void coordinator.requestConnect(CONNECT);
+    await flush();
+    const [requestId] = Object.keys(pending());
+
+    await coordinator.focusWindow(requestId as RequestId);
+
+    expect(focused).toEqual([100]);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * IT NEVER OPENS. THAT IS THE WHOLE RULE
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: si el usuario cerró la ventana, esa solicitud YA se rechazó con
+   * 4001 —lo caza el `onDisconnect` del puerto keep-alive— y no queda nada en
+   * storage. Abrir una ventana aquí sería pedirle que decida otra vez algo que
+   * ya decidió, y encima sobre una petición a la que la dApp ya recibió su
+   * respuesta.
+   */
+  it("does nothing when the request is already gone", async () => {
+    const { coordinator, focused, opened } = setup();
+
+    await coordinator.focusWindow("a-request-that-never-existed");
+
+    expect(focused).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+
+  it("does not resurrect a window for a request the user closed", async () => {
+    const { coordinator, focused, opened, pending } = setup();
+
+    const waiting = coordinator.requestConnect(CONNECT).catch(() => undefined);
+    await flush();
+    const [requestId] = Object.keys(pending());
+
+    // Closing the window rejects with 4001 and forgets the request.
+    await coordinator.reject(requestId as RequestId, ProviderErrors.userRejected());
+    await waiting;
+
+    await coordinator.focusWindow(requestId as RequestId);
+
+    expect(focused).toEqual([]);
+    expect(opened).toEqual([requestId]);
+  });
+
+  it("does nothing for an expired request instead of focusing a dead window", async () => {
+    const { coordinator, focused, pending, advance } = setup({ timeoutMs: 60_000 });
+
+    void coordinator.requestConnect(CONNECT).catch(() => undefined);
+    await flush();
+    const [requestId] = Object.keys(pending());
+
+    advance(60_001);
+    await coordinator.focusWindow(requestId as RequestId);
+
+    expect(focused).toEqual([]);
   });
 });

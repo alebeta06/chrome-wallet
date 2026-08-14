@@ -47,6 +47,7 @@ import {
 } from "@/types/messages";
 
 import { ProviderError } from "./errors";
+import { NO_NOTIFIER, type Notifier } from "./notifications";
 import { createSerializer } from "./serialize";
 import type { WalletStorage } from "./storage";
 
@@ -65,11 +66,22 @@ export interface ApprovalWindows {
    */
   open(requestId: RequestId, kind: PendingKind): Promise<number | undefined>;
   close(windowId: number): Promise<void>;
+  /**
+   * Brings an already-open window to the front. NEVER opens one.
+   *
+   * 🇪🇸 NOTA: la asimetría con `open` es deliberada y es la regla entera de este
+   * método. Enfocar es "trae al frente lo que ya está"; si la ventana ya no
+   * existe, esto no hace nada. Resucitarla sería reabrir una decisión que el
+   * usuario ya tomó — cerrar la ventana YA rechazó la solicitud con 4001.
+   */
+  focus(windowId: number): Promise<void>;
 }
 
 export interface ApprovalDeps {
   storage: WalletStorage;
   windows: ApprovalWindows;
+  /** Desktop toasts. Courtesy only — see `notifications.ts`. */
+  notifier?: Notifier;
   /** Injected so tests are not at the mercy of the clock. */
   now?: () => number;
   /** Overrides per kind. Anything missing falls back to the contract's value. */
@@ -115,6 +127,15 @@ export interface ApprovalCoordinator {
   reject(requestId: RequestId, error: SerializedProviderError): Promise<void>;
   /** Backs wallet_getPendingRequest so the approval window can render itself. */
   read(requestId: RequestId): Promise<PendingRequest | null>;
+  /**
+   * Brings the window of a still-waiting request to the front, if there is one.
+   *
+   * 🇪🇸 NOTA: esto lo llama el click en la notificación. NO abre nada: si la
+   * solicitud ya no está —caducó, se resolvió, el usuario cerró la ventana— el
+   * click no hace nada, y es lo correcto. Abrir una ventana desde aquí
+   * significaría pedirle al usuario que vuelva a decidir algo que ya decidió.
+   */
+  focusWindow(requestId: RequestId): Promise<void>;
 }
 
 /**
@@ -136,6 +157,7 @@ interface Waiter {
 export function createApprovalCoordinator({
   storage,
   windows,
+  notifier = NO_NOTIFIER,
   now = () => Date.now(),
   timeouts = {},
 }: ApprovalDeps): ApprovalCoordinator {
@@ -225,6 +247,28 @@ export function createApprovalCoordinator({
     return list;
   }
 
+  /**
+   * ------------------------------------------------------------------------
+   * SETTLED IS SETTLED: THE TOAST GOES TOO
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: `dismiss` va FUERA del `if` de la ventana, y ésa es la diferencia
+   * que importa. `closeWindow` no hace nada si no hay `windowId` —porque el
+   * worker murió antes de registrarlo, o porque `open` falló— pero la
+   * notificación puede existir igualmente: se dispara al presentar, no al
+   * registrar. Colgar el `clear` del cierre de ventana dejaría justo esos casos
+   * con un aviso en pantalla de algo ya resuelto.
+   *
+   * Las dos salidas —aprobar y rechazar— pasan por aquí, que es lo que evita
+   * que una de las dos se olvide.
+   */
+  async function dismissAndClose(
+    requestId: RequestId,
+    pending: PendingRequest | null,
+  ): Promise<void> {
+    await notifier.dismiss(requestId);
+    await closeWindow(pending);
+  }
+
   async function closeWindow(pending: PendingRequest | null): Promise<void> {
     if (pending?.windowId === undefined) return;
 
@@ -244,7 +288,7 @@ export function createApprovalCoordinator({
     if (pending === null && list.length === 0) return;
 
     for (const waiter of list) waiter.resolve(decision);
-    await closeWindow(pending);
+    await dismissAndClose(requestId, pending);
   }
 
   async function reject(requestId: RequestId, error: SerializedProviderError): Promise<void> {
@@ -255,7 +299,7 @@ export function createApprovalCoordinator({
     if (pending === null && list.length === 0) return;
 
     for (const waiter of list) waiter.reject(new ProviderError(error));
-    await closeWindow(pending);
+    await dismissAndClose(requestId, pending);
   }
 
   /**
@@ -345,7 +389,29 @@ export function createApprovalCoordinator({
 
     if (windowId !== undefined) await attachWindow(pending.id, windowId);
 
+    /**
+     * 🇪🇸 NOTA: aquí y no dentro de `windows.open`. Este punto se alcanza SOLO
+     * para una solicitud nueva —un duplicado ha vuelto ya arriba, enganchado a
+     * la ventana que estaba— así que es exactamente una notificación por
+     * pregunta. Y va después de abrir: si abrir falla, ya se rechazó y no hay
+     * nada que anunciar.
+     */
+    await notifier.announce(pending.id, pending.kind);
+
     return decision;
+  }
+
+  /** See the interface: this focuses, and focusing never creates. */
+  async function focusWindow(requestId: RequestId): Promise<void> {
+    const pending = await read(requestId);
+    if (pending?.windowId === undefined) return;
+
+    try {
+      await windows.focus(pending.windowId);
+    } catch (cause) {
+      // The window went away between the read and the focus. Nothing to do.
+      console.error("[codecrypto] could not focus the approval window:", cause);
+    }
   }
 
   async function requestConnect({
@@ -471,7 +537,7 @@ export function createApprovalCoordinator({
     );
   }
 
-  return { requestConnect, requestSignature, requestAddChain, settle, reject, read };
+  return { requestConnect, requestSignature, requestAddChain, settle, reject, read, focusWindow };
 }
 
 /**

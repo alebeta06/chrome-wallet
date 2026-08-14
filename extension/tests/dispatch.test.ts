@@ -160,6 +160,7 @@ function fakeApprovals(outcome: { approve: number } | { reject: SerializedProvid
     settle: async () => {},
     reject: async () => {},
     read: async () => null,
+    focusWindow: () => Promise.resolve(),
   };
 
   return { approvals, asked, signed, chains };
@@ -1832,6 +1833,7 @@ describe("a pending approval whose chain moved", () => {
       settle: async () => {},
       reject: async () => {},
       read: async () => null,
+      focusWindow: () => Promise.resolve(),
     };
 
     return { approvals, holder };

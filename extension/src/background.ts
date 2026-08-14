@@ -22,6 +22,7 @@ import { createBadge } from "@/lib/badge";
 import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
 import { createLogWriter } from "@/lib/logs";
+import { createNotifier, requestIdFromNotification } from "@/lib/notifications";
 import { createNetworkStore } from "@/lib/network-store";
 import { createPermissionsPort, hasPermissionFor } from "@/lib/permissions";
 import { createTransactionSender } from "@/lib/signer";
@@ -55,25 +56,28 @@ const APPROVAL_PAGE: Record<PendingKind, string> = {
   "add-chain": "notification.html",
 };
 
-const NOTIFICATION_TEXT: Record<PendingKind, { title: string; message: string }> = {
-  connect: { title: "Connection request", message: "A site wants to connect to your wallet." },
-  signature: { title: "Signature request", message: "A site is asking you to sign a transaction." },
-  "add-chain": { title: "Network request", message: "A site wants to add a network." },
-};
-
 /**
  * 🇪🇸 NOTA: PNG, nunca el SVG. `chrome.notifications` falla EN SILENCIO con un
  * SVG — sin excepción, sin notificación y sin nada en consola. Los PNG los
- * genera `pnpm icons` desde la Fase 0 y están en `dist/icons/`.
+ * genera `pnpm icons` desde la Fase 0 y están en `dist/icons/`. La ruta y los
+ * textos viven ahora en `lib/notifications.ts`, con el resto de la decisión.
  */
-const NOTIFICATION_ICON = "icons/icon-128.png";
+const notifier = createNotifier({
+  create: async (id, options) => {
+    await chrome.notifications.create(id, { type: "basic", priority: 2, ...options });
+  },
+  clear: async (id) => {
+    await chrome.notifications.clear(id);
+  },
+});
 
 const windows: ApprovalWindows = {
   /**
-   * 🇪🇸 NOTA: aquí se abre la ventana Y se dispara la notificación de escritorio.
-   * No es mezclar dos cosas: este método es "preséntale esto al usuario", y es
-   * el único punto que se ejecuta exactamente una vez por solicitud nueva.
-   * Colgar la notificación de un listener de storage la repetiría en cada cambio.
+   * 🇪🇸 NOTA: esto ya SOLO abre la ventana. La notificación se disparaba aquí
+   * dentro, y se ha movido al coordinador —que es quien sabe si la solicitud es
+   * nueva o un duplicado enganchado— para que crear y cerrar el aviso vivan en
+   * el mismo sitio. Con `create` aquí y `clear` allí, el día que una de las dos
+   * cambie el id, el síntoma sería un aviso que no se cierra nunca.
    */
   async open(requestId: RequestId, kind: PendingKind) {
     const page = APPROVAL_PAGE[kind];
@@ -86,28 +90,17 @@ const windows: ApprovalWindows = {
       ...APPROVAL_WINDOW,
     });
 
-    notify(requestId, kind);
-
     return created?.id;
   },
 
   async close(windowId: number) {
     await chrome.windows.remove(windowId);
   },
+
+  async focus(windowId: number) {
+    await chrome.windows.update(windowId, { focused: true });
+  },
 };
-
-function notify(requestId: RequestId, kind: PendingKind): void {
-  const { title, message } = NOTIFICATION_TEXT[kind];
-
-  // Fire and forget: a wallet that cannot show a toast still works perfectly.
-  chrome.notifications.create(`codecrypto:${requestId}`, {
-    type: "basic",
-    iconUrl: NOTIFICATION_ICON,
-    title,
-    message,
-    priority: 2,
-  });
-}
 
 /**
  * The origin of the tab the user is looking at, for WalletSnapshot.activeSite.
@@ -133,7 +126,7 @@ async function activeOrigin(): Promise<Origin | null> {
 // Wiring
 // ============================================================================
 
-const approvals = createApprovalCoordinator({ storage, windows });
+const approvals = createApprovalCoordinator({ storage, windows, notifier });
 
 /**
  * 🇪🇸 NOTA: UNA instancia, aquí, y pasada a todo lo que escribe en el registro.
@@ -304,6 +297,33 @@ async function ensureProviderUuid(area: WalletStorage): Promise<void> {
 
 void ensureProviderUuid(storage).catch((cause: unknown) => {
   console.error(`[${PROTOCOL}] could not seed the provider uuid:`, cause);
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * CLICKING THE TOAST FOCUSES. IT NEVER OPENS.
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la ventana que corresponde a esa solicitud ya está abierta, así que
+ * lo único que hay que hacer es traerla al frente. Crear una segunda para la
+ * misma solicitud daría dos ventanas pidiendo la misma decisión, y aprobar en
+ * una dejaría la otra huérfana diciendo que la solicitud ya no espera.
+ *
+ * Y si la solicitud YA NO ESTÁ —el usuario cerró la ventana, o caducó— el click
+ * no hace nada. Cerrar la ventana ya la rechazó con 4001 (lo caza el
+ * `onDisconnect` del puerto de abajo, no `windows.onRemoved`), así que
+ * reabrirla sería pedirle al usuario que decida otra vez algo ya decidido.
+ *
+ * El aviso puede sobrevivir a su solicitud: `clear` se llama al resolver, pero
+ * si el worker murió antes, el toast se queda en pantalla. Por eso este camino
+ * tiene que tolerar que no haya nada al otro lado.
+ */
+chrome.notifications.onClicked.addListener((notificationId) => {
+  const requestId = requestIdFromNotification(notificationId);
+  if (requestId === null) return;
+
+  void approvals.focusWindow(requestId).catch((cause: unknown) => {
+    console.error(`[${PROTOCOL}] could not focus the window of a notification:`, cause);
+  });
 });
 
 // ============================================================================
