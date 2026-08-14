@@ -16,6 +16,20 @@ function seededStorage() {
     "cc:chainId": "0x7a69",
     "cc:connectedSites": {},
     "cc:pendingRequests": {},
+    /**
+     * 🇪🇸 NOTA: sembrada A PROPÓSITO, y el motivo es que sin ella la aserción de
+     * abajo no dice nada sobre esta clave. `toEqual([...])` compara lo que QUEDA
+     * con lo esperado; una clave que nunca se sembró no puede quedar, así que el
+     * test pasaría igual estuviera `cc:pendingTxs` en el lado que muere o en el
+     * que sobrevive.
+     *
+     * Es la misma familia que las lecciones de la Fase 8: una garantía que solo
+     * existe en la frase que la describe. Con la siembra, moverla al lado
+     * equivocado pone el test rojo — que es lo que se creía que ya hacía.
+     */
+    "cc:pendingTxs": {
+      "0x7a69:0xdead": { hash: "0xdead", chainId: "0x7a69", sentAt: 0, accountIndex: 0 },
+    },
     "cc:providerUuid": "0f1d1f9c-0000-4000-8000-000000000000",
     "cc:logs": [{ id: "1", ts: 0, level: "operation", label: "seeded" }],
   });

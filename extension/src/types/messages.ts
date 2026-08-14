@@ -281,6 +281,56 @@ export type RpcMethod = keyof RpcMap;
 export type RpcParams<M extends RpcMethod> = RpcMap[M]["params"];
 export type RpcResult<M extends RpcMethod> = RpcMap[M]["result"];
 
+/**
+ * ---------------------------------------------------------------------------
+ * EVERY METHOD THE CONTRACT DECLARES, AS SOMETHING A TEST CAN ITERATE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: esto existe por un comentario que mentía. El `default` del switch de
+ * `dispatch.ts` decía "Every method in the contract is implemented now" y era
+ * falso: `wallet_internalTransfer` está declarado desde la Fase 3 y no tiene
+ * `case`, así que responde 4200 a un método que el contrato promete.
+ *
+ * El typecheck NO lo caza, y eso es lo que lo hace peligroso: el método cae por
+ * el `default`, que es una rama que existe y compila. Un comentario no es una
+ * comprobación.
+ *
+ * La forma importa. La unión NO se deriva de esta lista —sale de `keyof RpcMap`,
+ * y `RpcMap` lleva además los tipos de `params` y `result` de cada método, que
+ * un array de nombres no puede cargar—. Lo que hace el `Record` es lo contrario
+ * y es lo que hace falta: **obliga a que la lista esté completa**. Falta un
+ * método y no compila; se inventa uno y tampoco.
+ *
+ * El valor `true` no significa nada: el tipo del Record es todo el mecanismo.
+ */
+const EVERY_METHOD: Record<RpcMethod, true> = {
+  eth_requestAccounts: true,
+  eth_accounts: true,
+  eth_chainId: true,
+  eth_getBalance: true,
+  eth_sendTransaction: true,
+  eth_signTypedData_v4: true,
+  wallet_switchEthereumChain: true,
+  wallet_addEthereumChain: true,
+  wallet_revokePermissions: true,
+  wallet_getState: true,
+  wallet_createMnemonic: true,
+  wallet_importMnemonic: true,
+  wallet_setDefaultAccount: true,
+  wallet_setSiteAccount: true,
+  wallet_setActiveNetwork: true,
+  wallet_addNetwork: true,
+  wallet_removeNetwork: true,
+  wallet_getBalances: true,
+  wallet_internalTransfer: true,
+  wallet_getConnectedSites: true,
+  wallet_disconnectSite: true,
+  wallet_reset: true,
+  wallet_getPendingRequest: true,
+};
+
+/** Every method name the contract declares. Complete by construction. */
+export const ALL_RPC_METHODS = Object.keys(EVERY_METHOD) as RpcMethod[];
+
 const PUBLIC_METHODS: ReadonlySet<string> = new Set<PublicRpcMethod>([
   "eth_requestAccounts",
   "eth_accounts",
@@ -602,6 +652,53 @@ export function parseApprovalPortName(name: string): RequestId | null {
 // ============================================================================
 
 /**
+ * A transaction that was broadcast and has not been accounted for yet.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS PERSISTED AT ALL
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: porque `await tx.wait()` en el service worker es el bug número uno de
+ * MV3 con otro disfraz — es "guarda una promesa y espera", y en Sepolia son
+ * 12-15 segundos. Chrome mata el worker mucho antes, así que la notificación de
+ * minado no llegaría nunca. Lo que sobrevive a la muerte del worker es storage:
+ * se anota el hash, y al despertar se pregunta por el recibo.
+ *
+ * ---------------------------------------------------------------------------
+ * THE IDENTITY IS hash + chainId, AND THE KEY SAYS SO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: se guarda en un Record con clave `${chainId}:${hash}` y no en un
+ * array. El motivo principal no es teórico: **hace falta el `chainId` de todas
+ * formas** para saber a qué RPC preguntar por el recibo, así que la identidad
+ * compuesta es la forma natural del dato.
+ *
+ * Y cierra gratis un caso que sí es teórico: bajo EIP-155 el chainId va dentro
+ * de lo firmado, así que el mismo nonce en dos redes ya da hashes distintos —
+ * pero una cadena de desarrollo mal configurada puede no aplicarlo, y ahí sí
+ * colisionarían. El diseño no depende de que cada nodo lo haga bien.
+ */
+export interface PendingTx {
+  hash: Hex;
+  /** Which node to ask. The other half of the identity. */
+  chainId: Hex;
+  /** When it was broadcast, for the age-out. */
+  sentAt: number;
+  accountIndex: number;
+  /**
+   * Absent for an internal transfer: the popup is not an origin.
+   *
+   * 🇪🇸 NOTA: sin esto, la segunda línea de la operación —"confirmada"— no podría
+   * decir quién la pidió, y el par entero quedaría atribuido a medias. La spec 16
+   * es sobre el par, no sobre la primera mitad.
+   */
+  origin?: Origin;
+}
+
+/** How a pending transaction is keyed. See the note on PendingTx. */
+export function pendingTxKey(chainId: Hex, hash: Hex): string {
+  return `${chainId}:${hash}`;
+}
+
+/**
  * Everything persisted in chrome.storage.local, typed in one place.
  * Keys are namespaced to avoid collisions and to make `wallet_reset` explicit
  * about what it wipes and what it keeps.
@@ -615,6 +712,8 @@ export interface StorageSchema {
   "cc:networks": NetworkConfig[];
   "cc:connectedSites": Record<Origin, ConnectedSite>;
   "cc:pendingRequests": Record<RequestId, PendingRequest>;
+  /** Broadcast and not yet accounted for. Keyed by `pendingTxKey`. */
+  "cc:pendingTxs": Record<string, PendingTx>;
   /** EIP-6963 identity, generated once and stable for the install. */
   "cc:providerUuid": string;
   /** Survives wallet_reset by design (spec 24). */
@@ -630,6 +729,14 @@ export const RESET_CLEARED_KEYS: readonly StorageKey[] = [
   "cc:defaultAccountIndex",
   "cc:connectedSites",
   "cc:pendingRequests",
+  /**
+   * 🇪🇸 NOTA: muere con el reset, al revés que `cc:logs`. Una transacción
+   * pendiente es material derivado de las claves que se acaban de borrar: sin
+   * cuentas no hay a quién atribuirla, y notificar su minado después de un reset
+   * sería hablar de una wallet que ya no existe. Lo que SÍ sobrevive es su
+   * huella en el registro, que es donde tiene que estar.
+   */
+  "cc:pendingTxs",
 ] as const;
 
 export const MAX_LOG_ENTRIES = 500;

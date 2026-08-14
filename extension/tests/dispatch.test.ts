@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ALL_RPC_METHODS,
+  type RpcMethod,
   ErrorCode,
   MAX_LOG_ENTRIES,
   type ConnectedSite,
@@ -574,6 +576,72 @@ describe("wallet_reset", () => {
 
     // Logs survive a reset by design (spec 24).
     expect(area.keys()).toContain("cc:logs");
+  });
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE COMMENT THAT LIED, TURNED INTO A CHECK
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: el `default` del switch decía "Every method in the contract is
+ * implemented now". Era falso —`wallet_internalTransfer` lleva declarado desde
+ * la Fase 3 sin `case`— y el typecheck no puede cazarlo, porque caer por el
+ * `default` es una rama que existe y compila. La wallet respondía 4200 a un
+ * método que el contrato promete.
+ *
+ * Lo que se afirma es que NINGUNO responde 4200, no que ninguno dé error. Un
+ * método interno llamado con params vacíos contesta -32602, y uno público sin
+ * conexión contesta 4100: las dos son respuestas legítimas y correctas. La única
+ * que significa "esto no existe" es 4200.
+ */
+describe("every method the contract declares", () => {
+  /**
+   * ------------------------------------------------------------------------
+   * THE KNOWN GAP, DECLARED SO IT CANNOT BE FORGOTTEN
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: `wallet_internalTransfer` está en el contrato desde la Fase 3 y no
+   * tiene `case`. Es exactamente el agujero que este bloque existe para
+   * encontrar, y lo encontró en su primera ejecución.
+   *
+   * Se declara aquí en vez de esconderlo, y la lista se limpia SOLA: el test de
+   * abajo afirma que estos métodos SIGUEN respondiendo 4200, así que en cuanto
+   * se implemente uno se pone rojo y obliga a sacarlo de la lista. Una excepción
+   * que no puede quedarse olvidada, que es lo único que hace tolerable tener
+   * una.
+   */
+  const NOT_DISPATCHED_YET: RpcMethod[] = ["wallet_internalTransfer"];
+
+  it.each(ALL_RPC_METHODS.filter((method) => !NOT_DISPATCHED_YET.includes(method)))(
+    "%s is not answered with 4200",
+    async (method) => {
+      const { dispatch } = setup(LOADED_WALLET);
+
+      // From the extension's own UI, so the trust boundary never answers first.
+      const response = await dispatch(request(method), uiSender(), RUNTIME_ID);
+
+      if (!response.ok) {
+        expect(response.error.code).not.toBe(ErrorCode.UNSUPPORTED_METHOD);
+      }
+    },
+  );
+
+  /** Goes red the moment the gap is closed, which is how the list empties. */
+  it.each(NOT_DISPATCHED_YET)("%s is still the known gap", async (method) => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    const response = await dispatch(request(method), uiSender(), RUNTIME_ID);
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.code).toBe(ErrorCode.UNSUPPORTED_METHOD);
+  });
+
+  it("still answers 4200 to something the contract never declared", async () => {
+    const { dispatch } = setup(LOADED_WALLET);
+
+    const response = await dispatch(request("eth_mine_all_the_coins"), uiSender(), RUNTIME_ID);
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.code).toBe(ErrorCode.UNSUPPORTED_METHOD);
   });
 });
 
