@@ -756,3 +756,136 @@ input[type="checkbox"] {
   font-size: 12px;
   color: var(--danger, #ff5a5a);
 }
+
+/* --------------------------------------------------------------------------
+   Activity log (specs 13-16)
+
+   🇪🇸 NOTA: el color lo decide `level`, que es lo único que el registro guarda.
+   Guardar un color habría atado el historial a la paleta: cambiarla obligaría a
+   reescribir lo que ya pasó, que es justo lo que un registro no puede hacer.
+   -------------------------------------------------------------------------- */
+
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.log-filter {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.log-filter:hover {
+  background: var(--surface-hover);
+}
+
+.log-filter--on {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.log-empty {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.log-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* 500 entries do not fit in a popup, and the panel must not push the accounts
+     off the screen: the log scrolls inside itself. */
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.log-row__level {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.log-row__label {
+  font-family: var(--font-mono);
+  word-break: break-all;
+  min-width: 0;
+}
+
+.log-row__count {
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text-muted);
+}
+
+.log-row__time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.log-row__origin {
+  grid-column: 2 / -1;
+  color: var(--text-muted);
+  word-break: break-all;
+  min-width: 0;
+}
+
+.log-row__detail {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  word-break: break-all;
+  min-width: 0;
+}
+
+.log-row--call {
+  border-left-color: var(--border);
+}
+
+.log-row--event {
+  border-left-color: var(--accent);
+}
+
+.log-row--operation {
+  border-left-color: var(--success);
+}
+
+/* Spec 15: errors are red, and it is the only level that gets a loud colour. */
+.log-row--error {
+  border-left-color: var(--error);
+}
+
+.log-row--error .log-row__level {
+  color: var(--error);
+}

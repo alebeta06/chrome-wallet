@@ -4,6 +4,7 @@ import type { WalletSnapshot } from "@/types/messages";
 import { useBalances } from "@/ui/hooks/useBalances";
 import { callBackground, toRpcError } from "@/ui/rpc";
 import { AccountRow } from "./AccountRow";
+import { ActivityLog } from "./ActivityLog";
 import { ActiveSiteBand } from "./ActiveSiteBand";
 import { ConnectedSites } from "./ConnectedSites";
 import { NetworkSelector } from "./NetworkSelector";
@@ -127,6 +128,16 @@ export function WalletView({ snapshot, onChanged }: WalletViewProps) {
         revision={revision}
         onChanged={refreshAll}
       />
+
+      {/*
+        🇪🇸 NOTA: el panel NO recibe `revision` ni `onChanged`, a diferencia de la
+        lista de sitios. Se entera solo, por `chrome.storage.onChanged`, y ésa es
+        la diferencia que importa: casi todo lo que acaba en el registro pasa con
+        el popup cerrado o sin que el popup haya hecho nada — una dApp firmando,
+        un evento saliendo. Colgarlo de las acciones del popup lo dejaría
+        enseñando un registro viejo justo cuando hay algo nuevo que ver.
+      */}
+      <ActivityLog />
 
       <ResetButton onReset={refreshAll} />
     </div>

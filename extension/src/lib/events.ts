@@ -99,6 +99,20 @@ export function eventDetail<E extends ProviderEventName>(
  * paralela a la del worker, y dos cadenas ciegas la una a la otra pierden
  * líneas justo bajo concurrencia. Éste no escribe nada, así que no hay nada que
  * pisar. El único emisor de producción —`background.ts`— pasa el de verdad.
+ *
+ * ---------------------------------------------------------------------------
+ * LA INERCIA ES LA PROPIEDAD, NO UN DETALLE DE IMPLEMENTACIÓN
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: que este cuerpo esté VACÍO es lo único que hace legítimo que sea un
+ * valor por defecto. En el momento en que alguien lo "mejore" —que escriba en
+ * consola, que acumule las entradas en un array para depurar, que toque
+ * cualquier estado— vuelve a ser un segundo escritor con vida propia, y la
+ * distinción del párrafo de arriba se evapora EN SILENCIO: nada fallaría, nada
+ * avisaría, y volveríamos a tener dos cosas escribiendo el mismo registro sin
+ * verse.
+ *
+ * Si esto necesita hacer algo alguna vez, la respuesta no es rellenarlo: es
+ * quitar el valor por defecto y pasarlo explícitamente, como en el despachador.
  */
 const NO_LOGS: LogWriter = { append: () => Promise.resolve() };
 
