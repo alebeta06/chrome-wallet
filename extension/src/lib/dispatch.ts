@@ -46,6 +46,7 @@ import {
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
 import { createLogEntry, type LogDetail, type LogWriter } from "./logs";
+import { pendingTxFrom, type PendingTxStore } from "./pending-txs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
@@ -120,6 +121,12 @@ export interface DispatcherDeps {
    * y por tanto la misma trampa, latente porque el worker sí pasa la suya.
    */
   logs: LogWriter;
+  /**
+   * Phase 9. Transactions broadcast and not yet accounted for. REQUIRED, same
+   * reason as `logs`: it carries its own serialization chain, and a default
+   * would build a second one blind to the worker's.
+   */
+  pendingTxs: PendingTxStore;
   /** Phase 8. Injected so the snapshot can be built without chrome.permissions. */
   permissions?: PermissionsPort;
   /** Phase 8. Injected so adding a network is testable without a node. */
@@ -137,6 +144,7 @@ interface HandlerContext {
   activeOrigin: () => Promise<Origin | null>;
   networks: NetworkStore;
   logs: LogWriter;
+  pendingTxs: PendingTxStore;
   permissions: PermissionsPort;
   readChainId: ChainIdReader;
 }
@@ -212,6 +220,7 @@ export function createDispatcher({
   activeOrigin = () => Promise.resolve(null),
   networks = createNetworkStore(storage),
   logs,
+  pendingTxs,
   permissions = ALL_GRANTED,
   readChainId = defaultFetchChainId,
 }: DispatcherDeps): Dispatcher {
@@ -225,6 +234,7 @@ export function createDispatcher({
     activeOrigin,
     networks,
     logs,
+    pendingTxs,
     permissions,
     readChainId,
   };
@@ -664,7 +674,7 @@ interface BroadcastInput {
  * mucho antes. El sitio está previsto; el código llega con las notificaciones.
  */
 async function signBroadcastAndRecord(
-  { storage, sender, logs }: HandlerContext,
+  { storage, sender, logs, pendingTxs }: HandlerContext,
   { network, accountIndex, transaction, origin }: BroadcastInput,
 ): Promise<Hex> {
   /**
@@ -697,6 +707,30 @@ async function signBroadcastAndRecord(
     accountIndex,
     hash,
   });
+
+  /**
+   * 🇪🇸 NOTA: se anota DESPUÉS de difundir y antes de devolver. Aquí no se espera
+   * al recibo: `await tx.wait()` son 12-15 s en Sepolia y Chrome mata el worker
+   * mucho antes, así que la espera se guarda en disco y se resuelve al despertar.
+   * Ver `pending-txs.ts`.
+   *
+   * Si esto falla, la transacción YA está difundida y la dApp tiene su hash: lo
+   * único que se pierde es la segunda línea del registro y el aviso de minado.
+   * No puede convertirse en un error para quien la pidió.
+   */
+  try {
+    await pendingTxs.track(
+      pendingTxFrom({
+        hash,
+        chainId: network.chainId,
+        accountIndex,
+        sentAt: Date.now(),
+        ...(origin === undefined ? {} : { origin }),
+      }),
+    );
+  } catch (cause) {
+    console.error("[codecrypto] could not track a broadcast transaction:", cause);
+  }
 
   return hash;
 }

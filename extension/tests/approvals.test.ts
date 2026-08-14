@@ -57,6 +57,7 @@ function setup(options: { timeoutMs?: number; failOpen?: boolean } = {}) {
     dismiss: vi.fn(async (requestId) => {
       dismissed.push(requestId);
     }),
+    announceTransaction: vi.fn(async () => undefined),
   };
 
   const coordinator = createApprovalCoordinator({

@@ -89,6 +89,58 @@ export function createRpcProvider(network: NetworkConfig): JsonRpcProvider {
  */
 export type ChainIdReader = (network: NetworkConfig) => Promise<string>;
 
+/**
+ * What a receipt says, reduced to the only two things this wallet acts on.
+ *
+ * ---------------------------------------------------------------------------
+ * THREE ANSWERS, NOT TWO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: `null` NO es lo mismo que `{ status: 0 }`, y confundirlos es el
+ * error que este tipo existe para hacer difícil.
+ *
+ *   null            → el nodo no la conoce todavía. Puede minarse dentro de diez
+ *                     segundos. No ha pasado NADA.
+ *   { status: 1 }   → minada y ejecutada.
+ *   { status: 0 }   → minada y REVERTIDA. Gastó gas, está en la cadena, y no
+ *                     hizo lo que se le pidió.
+ *
+ * Tratar un `null` como fallo le diría al usuario que algo salió mal antes de
+ * que haya salido nada; tratar un `status: 0` como pendiente dejaría esperando
+ * para siempre algo que ya terminó.
+ *
+ * Y hay una cuarta respuesta que no es un valor: que la llamada LANCE. Eso
+ * significa que no sabemos nada —el nodo no contesta— y no autoriza a concluir
+ * ninguna de las tres.
+ */
+export interface TxReceipt {
+  status: 0 | 1;
+  blockNumber: number;
+}
+
+export type ReceiptReader = (network: NetworkConfig, hash: Hex) => Promise<TxReceipt | null>;
+
+/**
+ * 🇪🇸 NOTA: `status` puede venir `null` en un recibo de una cadena pre-Byzantium,
+ * donde el campo no existía. Ninguna red de este proyecto lo es, pero un `null`
+ * ahí se tomaría como falsy y convertiría un éxito en una reversión — así que se
+ * trata explícitamente como "no lo sé" y se deja pendiente, que es la respuesta
+ * conservadora.
+ */
+export const fetchReceipt: ReceiptReader = async (network, hash) => {
+  const provider = createRpcProvider(network);
+
+  try {
+    const receipt = await provider.getTransactionReceipt(hash);
+    if (receipt === null || receipt.status === null) return null;
+
+    return { status: receipt.status === 0 ? 0 : 1, blockNumber: receipt.blockNumber };
+  } catch (cause) {
+    throw unreachable(network, cause);
+  } finally {
+    provider.destroy();
+  }
+};
+
 export const fetchChainId: ChainIdReader = async (network) => {
   const provider = createRpcProvider(network);
 

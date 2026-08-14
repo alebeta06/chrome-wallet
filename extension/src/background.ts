@@ -23,6 +23,8 @@ import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
 import { createLogWriter } from "@/lib/logs";
 import { createNotifier, requestIdFromNotification } from "@/lib/notifications";
+import { createPendingTxStore } from "@/lib/pending-txs";
+import { fetchReceipt } from "@/lib/chain";
 import { createNetworkStore } from "@/lib/network-store";
 import { createPermissionsPort, hasPermissionFor } from "@/lib/permissions";
 import { createTransactionSender } from "@/lib/signer";
@@ -152,6 +154,24 @@ const sender = createTransactionSender();
 const networks = createNetworkStore(storage, emit);
 const permissions = createPermissionsPort();
 
+/**
+ * 🇪🇸 NOTA: UNA instancia, por lo mismo que el escritor de logs y el catálogo —
+ * lleva dentro la cadena que serializa `cc:pendingTxs`. `networkFor` resuelve la
+ * red por chainId contra el catálogo y devuelve null si el usuario la borró: sin
+ * red no hay a quién preguntar por el recibo, y la entrada envejece hasta que el
+ * descarte por antigüedad deja su línea.
+ */
+const pendingTxs = createPendingTxStore({
+  storage,
+  logs,
+  notifier,
+  readReceipt: fetchReceipt,
+  networkFor: async (chainId) => {
+    const { networks: catalogue } = await networks.read();
+    return catalogue.find((entry) => entry.chainId === chainId) ?? null;
+  },
+});
+
 const dispatch = createDispatcher({
   storage,
   approvals,
@@ -160,6 +180,7 @@ const dispatch = createDispatcher({
   activeOrigin,
   networks,
   logs,
+  pendingTxs,
   permissions,
 });
 

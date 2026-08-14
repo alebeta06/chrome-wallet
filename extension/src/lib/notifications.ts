@@ -48,11 +48,33 @@ export function notificationIdFor(requestId: RequestId): string {
   return `${NOTIFICATION_PREFIX}${requestId}`;
 }
 
-/** The request a notification belongs to, or null if the toast is not ours. */
+/**
+ * 🇪🇸 NOTA: espacio de ids SEPARADO del de las solicitudes. Si un aviso de
+ * minado compartiera espacio con uno de aprobación, el `clear` que se dispara al
+ * resolver una solicitud podría llevarse por delante el de una transacción — y
+ * al revés. Son dos ciclos de vida distintos: el de la solicitud lo cierra la
+ * decisión del usuario, el del minado no lo cierra nadie.
+ */
+const TX_PREFIX = `${NOTIFICATION_PREFIX}tx:`;
+
+export function transactionNotificationId(hash: string): string {
+  return `${TX_PREFIX}${hash}`;
+}
+
+/**
+ * The request a notification belongs to, or null if the toast is not ours.
+ *
+ * 🇪🇸 NOTA: los avisos de transacción se descartan EXPLÍCITAMENTE, y no es
+ * cosmético: `codecrypto:tx:0x…` empieza por el mismo prefijo, así que sin esta
+ * comprobación esta función devolvería `"tx:0x…"` como si fuera un requestId.
+ * El síntoma sería mudo —`focusWindow` no encontraría esa solicitud y no haría
+ * nada— que es justo el tipo de fallo que se queda años.
+ */
 export function requestIdFromNotification(notificationId: string): RequestId | null {
-  return notificationId.startsWith(NOTIFICATION_PREFIX)
-    ? notificationId.slice(NOTIFICATION_PREFIX.length)
-    : null;
+  if (!notificationId.startsWith(NOTIFICATION_PREFIX)) return null;
+  if (notificationId.startsWith(TX_PREFIX)) return null;
+
+  return notificationId.slice(NOTIFICATION_PREFIX.length);
 }
 
 /** What this module uses from chrome.notifications, and nothing more. */
@@ -73,6 +95,15 @@ export interface Notifier {
    * igual y nadie lo recogería.
    */
   dismiss(requestId: RequestId): Promise<void>;
+  /**
+   * Tells the user a transaction was mined, and whether it did what it was for.
+   *
+   * 🇪🇸 NOTA: una transacción REVERTIDA está minada. Gastó gas y está en la
+   * cadena, así que el aviso no puede decir lo mismo que el de una que fue bien
+   * — pero tampoco es un fallo de la wallet. Se avisa de las dos, con texto
+   * distinto.
+   */
+  announceTransaction(hash: string, confirmed: boolean): Promise<void>;
 }
 
 export function createNotifier(port: NotificationsPort): Notifier {
@@ -98,7 +129,35 @@ export function createNotifier(port: NotificationsPort): Notifier {
         console.error("[codecrypto] could not clear a notification:", cause);
       }
     },
+
+    async announceTransaction(hash, confirmed): Promise<void> {
+      const { title, message } = confirmed ? TX_CONFIRMED : TX_REVERTED;
+
+      try {
+        await port.create(transactionNotificationId(hash), {
+          title,
+          message: `${message} ${shortenHash(hash)}`,
+          iconUrl: NOTIFICATION_ICON,
+        });
+      } catch (cause) {
+        console.error("[codecrypto] could not announce a transaction:", cause);
+      }
+    },
   };
+}
+
+const TX_CONFIRMED = { title: "Transaction confirmed", message: "Mined successfully:" };
+
+/**
+ * 🇪🇸 NOTA: "reverted", no "failed". La transacción llegó a la cadena y se
+ * ejecutó; lo que pasó es que revirtió. Decir "failed" mezclaría este caso con
+ * "no se pudo enviar", que es otro problema con otra solución.
+ */
+const TX_REVERTED = { title: "Transaction reverted", message: "Mined, but it reverted:" };
+
+/** A toast is not the place for 66 characters of hexadecimal. */
+function shortenHash(hash: string): string {
+  return hash.length <= 16 ? hash : `${hash.slice(0, 10)}…${hash.slice(-6)}`;
 }
 
 /**
@@ -113,4 +172,5 @@ export function createNotifier(port: NotificationsPort): Notifier {
 export const NO_NOTIFIER: Notifier = {
   announce: () => Promise.resolve(),
   dismiss: () => Promise.resolve(),
+  announceTransaction: () => Promise.resolve(),
 };

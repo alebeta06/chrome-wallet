@@ -28,6 +28,7 @@ import type {
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createLogWriter } from "@/lib/logs";
+import type { PendingTxStore } from "@/lib/pending-txs";
 import { createWalletStorage, type StorageArea, type WalletStorage } from "@/lib/storage";
 import type { NetworkStore } from "@/lib/network-store";
 import type { PermissionsPort } from "@/lib/permissions";
@@ -87,6 +88,18 @@ function request(method: string, params: unknown[] = []): RpcRequestMessage {
   return { type: "CODECRYPTO_RPC", id: "req-1", method, params };
 }
 
+/**
+ * 🇪🇸 NOTA: inerte, y por el motivo de siempre: la mayoría de estos tests no
+ * miran `cc:pendingTxs`. Los que SÍ lo miran construyen el store de verdad.
+ */
+function silentPendingTxs(): PendingTxStore {
+  return {
+    track: () => Promise.resolve(),
+    read: () => Promise.resolve([]),
+    reconcile: () => Promise.resolve(0),
+  };
+}
+
 function setup(
   seed: Record<string, unknown> = {},
   fetchBalances?: BalanceReader,
@@ -121,6 +134,7 @@ function setup(
        * que es la lección de la Fase 8 sobre los dos `setup()`.
        */
       logs: createLogWriter(createWalletStorage(observedArea)),
+      pendingTxs: silentPendingTxs(),
       ...(fetchBalances === undefined ? {} : { fetchBalances }),
       ...(fetchBalanceAt === undefined ? {} : { fetchBalanceAt }),
       ...extra,
@@ -660,7 +674,7 @@ describe("unexpected failures", () => {
       resetWallet: () => Promise.resolve(),
     };
 
-    return createDispatcher({ storage, logs: createLogWriter(storage) });
+    return createDispatcher({ storage, logs: createLogWriter(storage), pendingTxs: silentPendingTxs() });
   }
 
   it("never rejects — a thrown dependency becomes a failure response", async () => {
@@ -1420,7 +1434,7 @@ describe("the activity log", () => {
       resetWallet: () => Promise.resolve(),
     } as unknown as WalletStorage;
 
-    const dispatch = createDispatcher({ storage, logs: createLogWriter(storage) });
+    const dispatch = createDispatcher({ storage, logs: createLogWriter(storage), pendingTxs: silentPendingTxs() });
 
     const response = await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID);
 
