@@ -1902,3 +1902,434 @@ una clave dentro no es un secreto — no hay equivalente a la fricción de un
 con -32602 por ser builtin—. Se cambia `DEFAULT_NETWORKS` en `src/lib/networks.ts`
 y el `host_permissions` de `src/manifest.ts`, y se reconstruye. Ver la NOTA junto
 a las builtin, que explica por qué eso arregla también los perfiles existentes.
+
+---
+
+# Fase 9 — Registro, avisos, reset y transferencias internas
+
+> **Fecha y navegador, en cada una.** Las 79-81 dejaron escrito de dónde salía
+> cada dato y por eso se pudieron releer un mes después. Estas nacen con el
+> hueco puesto: al pasarlas, rellena `Resultado` con **navegador + versión +
+> fecha**. Una comprobación sin esa línea no vale para discutirla luego — es la
+> lección de la 79, que midió `remove()` en Brave y viajó a Chrome.
+
+## Las cinco superficies, y en cuál va cada paso
+
+Esta fase se mueve entre más ventanas que ninguna anterior, así que cada paso
+lleva delante dónde va:
+
+| Etiqueta | Qué es | Cómo se abre |
+|---|---|---|
+| **[T-anvil]** | terminal del nodo local | `anvil` en su propia terminal |
+| **[T-dapp]** | terminal de la dApp | `pnpm dev` en `dapp/` |
+| **[worker]** | consola del **service worker** | `chrome://extensions` → tarjeta → **service worker** |
+| **[popup]** | consola del popup | abre el popup, botón derecho → **Inspeccionar** |
+| **[dApp]** | consola de la página web | F12 en `localhost:3000` |
+| **[aprobación]** | consola de `connect.html` / `notification.html` | botón derecho en esa ventana → **Inspeccionar** |
+
+> 🇪🇸 NOTA: el popup **se cierra al perder el foco**, y con él su consola. Para
+> inspeccionarlo hay que abrir su DevTools ANTES de hacer nada; si se cierra a
+> mitad, el panel de logs y la transferencia no se pueden depurar. Es la razón
+> de que casi todo lo de esta fase se mire desde **[worker]**, que no se cierra.
+
+**Cómo saber que el worker ha reiniciado de verdad:** arranca imprimiendo
+`[codecrypto] background service worker alive`. Si esa línea no aparece, no ha
+reiniciado y la comprobación no está midiendo lo que cree.
+
+---
+
+## 82. El rearme de la alarma al arrancar (LA MÁS IMPORTANTE)
+
+**Ésta es la única propiedad de la Fase 9 que ningún test puede falsar.** Quitar
+el barrido de arranque de `background.ts` no pone rojo nada — se comprobó — así
+que esto es lo único que la protege. Si alguna vez hay que recortar la lista,
+ésta se queda.
+
+Lo que está en juego: si al arrancar nadie recalcula, un worker que muera con
+transacciones en vuelo las deja **sin vigilar para siempre**. La alarma no vuelve
+sola, nadie pregunta por el recibo, y el usuario no recibe el aviso de algo que
+sí se minó. Sin ningún error en ninguna parte.
+
+1. **[T-anvil]** arranca el nodo con bloques lentos, para tener una transacción
+   en vuelo de verdad:
+
+   ```bash
+   anvil --block-time 60
+   ```
+
+2. **[dApp]** envía una transacción y apruébala. Vuelve el hash enseguida; la
+   transacción NO está minada.
+
+3. **[worker]** comprueba que la alarma existe:
+
+   ```js
+   await chrome.alarms.getAll()
+   // → [{ name: "codecrypto:pending-txs", periodInMinutes: 0.5, ... }]
+   ```
+
+4. **[worker]** ahora simula lo que la documentación de Chrome advierte — que la
+   alarma **no sobrevive de forma fiable** al reinicio del worker:
+
+   ```js
+   await chrome.alarms.clear('codecrypto:pending-txs')
+   await chrome.alarms.getAll()   // → []
+   ```
+
+5. Mata el worker. En `chrome://serviceworker-internals/` búscalo y pulsa
+   **Stop**; si no aparece, deja pasar ~30 s sin tocar nada hasta que la tarjeta
+   de `chrome://extensions` diga que el service worker está inactivo.
+
+6. Despiértalo abriendo el popup. **[worker]** confirma en su consola que salió
+   `[codecrypto] background service worker alive` — **sin esa línea no ha
+   reiniciado y el paso siguiente no prueba nada**.
+
+7. **[worker]**:
+
+   ```js
+   await chrome.alarms.getAll()
+   ```
+
+   **Esperado: la alarma está de vuelta**, con `periodInMinutes: 0.5`.
+
+8. **[T-anvil]** deja que pase el minuto. **Esperado:** salta la notificación de
+   escritorio de transacción confirmada, y en **[popup]** el panel de actividad
+   tiene la línea `transaction confirmed`.
+
+> **Por qué el paso 4 no sobra.** Sin borrar la alarma a mano, Chrome podría
+> conservarla por su cuenta y el paso 7 saldría verde aunque el rearme no
+> existiera — la comprobación pasaría por el motivo equivocado. Borrarla es lo
+> que hace que esto mida el rearme y no la persistencia de Chrome.
+
+> **Resultado:** _(pendiente — anota navegador, versión y fecha)_
+
+---
+
+## 83. La notificación de minado en Anvil, por el camino rápido
+
+Anvil mina en un segundo y la alarma no baja de 30 s, así que sin el atajo el
+aviso llegaría medio minuto tarde para algo instantáneo.
+
+1. **[T-anvil]** `anvil` (sin `--block-time`, minado instantáneo).
+2. **[dApp]** envía una transacción y apruébala.
+3. Cuenta. **Esperado: la notificación de "Transaction confirmed" aparece en
+   unos 3 segundos**, no en 30.
+4. **[popup]** el panel de actividad tiene **dos** líneas `operation` para esa
+   transacción: `transaction sent` y `transaction confirmed`.
+
+> El atajo es **mejor esfuerzo**: si Chrome hubiera suspendido el worker antes de
+> los 3 s, el aviso llegaría igualmente pero al saltar la alarma. Que tarde 30 s
+> no es un fallo; que no llegue nunca sí.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 84. La misma, en Sepolia, con los 12-15 segundos de verdad
+
+Éste es el caso que el `await tx.wait()` no habría sobrevivido nunca.
+
+1. **[popup]** cambia a **Sepolia**. Necesitas fondos de un faucet.
+2. **[dApp]** envía una transacción pequeña y apruébala.
+3. **Inmediatamente**, **[worker]**:
+
+   ```js
+   (await chrome.storage.local.get('cc:pendingTxs'))['cc:pendingTxs']
+   // → { "0xaa36a7:0x…": { hash, chainId, sentAt, accountIndex, origin } }
+   ```
+
+   La clave lleva **chainId y hash**, y `origin` es el de la dApp.
+
+4. **Deja el navegador quieto** y espera. **Esperado: la notificación llega**, y
+   `cc:pendingTxs` vuelve a `{}`.
+
+> Lo que se está probando es que la espera vive en **disco** y no en una promesa.
+> Si quieres verlo del todo, mata el worker en el paso 4 antes de que se mine:
+> el aviso llega igual cuando la alarma lo despierta.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 85. Una transacción revertida NO se cuenta como fallida ni como pendiente
+
+Las tres respuestas del nodo son distintas y el código las trata distinto:
+`null` (aún no minada), `status: 1` (minada), `status: 0` (**minada y
+revertida** — gastó gas y está en la cadena).
+
+1. **[T-anvil]** `anvil`.
+2. **[dApp]** manda una transacción que revierta: a un contrato que lance, o con
+   `gas` fijado tan bajo que se quede sin él.
+3. **Esperado:** notificación con título **"Transaction reverted"**, no
+   "confirmed" ni "failed".
+4. **[popup]** el panel tiene la línea `transaction reverted` en nivel
+   **`operation`**, no en `error`, y por tanto **no está en rojo**.
+
+> El rojo de la spec 15 significa "la wallet devolvió un código de error a una
+> dApp". Una reversión es la cadena contestando bien a lo que se le pidió. Si
+> esto sale rojo, alguien ha cambiado el nivel y el rojo ha dejado de significar
+> algo concreto.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 86. El descarte a la hora deja rastro, y no dice "failed"
+
+La hora no se espera: se falsea la fecha de envío.
+
+1. **[dApp]** envía una transacción con **[T-anvil]** `anvil --block-time 600`,
+   para que no se mine.
+2. **[worker]** envejece la entrada a mano:
+
+   ```js
+   const key = 'cc:pendingTxs';
+   const all = (await chrome.storage.local.get(key))[key];
+   const id = Object.keys(all)[0];
+   all[id].sentAt = Date.now() - 61 * 60 * 1000;   // hace 61 minutos
+   await chrome.storage.local.set({ [key]: all });
+   ```
+
+3. Espera a que salte la alarma (máximo 30 s) o abre el popup para despertar al
+   worker.
+4. **[worker]**:
+
+   ```js
+   (await chrome.storage.local.get('cc:pendingTxs'))['cc:pendingTxs']   // → {}
+   ```
+
+5. **[popup]** el panel tiene la línea **`stopped tracking transaction`** con
+   `waitedMinutes: 61`.
+
+**Esperado, y las dos mitades importan:**
+- la línea **NO** dice "failed" ni "error" — la transacción puede seguir en la
+  mempool y minarse mañana; lo que ha pasado es que la wallet deja de mirar;
+- **NO** aparece ninguna notificación de escritorio: al usuario no le ha pasado
+  nada nuevo.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 87. El panel de actividad: colores, filtro, colapso y copiar
+
+**[popup]**, con la wallet ya usada un rato (conecta una dApp, pide saldos,
+firma algo, provoca un error).
+
+1. **Colores.** Las líneas `error` salen en rojo; las de `event`, `operation` y
+   `call` no. El rojo es solo del nivel `error`.
+2. **Filtro.** Los cinco botones — *All, Calls, Events, Operations, Errors* —
+   filtran de uno en uno. **Los cuatro niveles son las specs 13-16 una a una**,
+   así que pulsarlos por orden es la demostración de las cuatro.
+3. **Colapso.** Recarga la dApp varias veces seguidas para provocar repeticiones
+   del mismo método. **Esperado:** una sola fila con `×N`, **no N filas**.
+4. **Colapso de verdad, no salteado.** Provoca A, A, B, A: pide saldo dos veces,
+   firma, y pide saldo otra vez. **Esperado: cuatro cosas en TRES filas** —
+   `eth_getBalance ×2`, la firma, `eth_getBalance`. Si sale `×3` y la firma, el
+   panel está reordenando y miente sobre el orden.
+5. **Vacío.** Con un perfil recién instalado, el panel dice *"Nothing has
+   happened yet."*. Con el filtro *Errors* puesto y sin errores, dice *"Nothing
+   of this kind in the log."*. **Son dos frases distintas a propósito**: decir lo
+   mismo haría pensar que el filtro está roto.
+6. **Copiar.** Pulsa *Copy logs*, pega en un editor. **Esperado:** JSON válido
+   con las entradas completas. El botón dice *Copied* un segundo.
+7. **En vivo.** Deja el popup abierto y provoca actividad desde **[dApp]**.
+   **Esperado:** el panel se actualiza **sin cerrarlo y abrirlo**.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 88. Ningún secreto en el registro
+
+**[dApp]**, con la wallet conectada. Firma un EIP-712 cuyo payload lleve un campo
+con nombre inventado:
+
+```js
+await provider.request({
+  method: 'eth_signTypedData_v4',
+  params: [addr, JSON.stringify({
+    domain: { name: 'Evil dApp', chainId: 31337 },
+    primaryType: 'Note',
+    types: { EIP712Domain: [{ name: 'name', type: 'string' }, { name: 'chainId', type: 'uint256' }],
+             Note: [{ name: 'userBackupPhrase', type: 'string' }] },
+    message: { userBackupPhrase: 'test test test test test test test test test test test junk' },
+  })],
+})
+```
+
+**[popup]** pulsa *Copy logs* y busca en lo pegado:
+
+- **`userBackupPhrase` NO aparece.**
+- **La frase NO aparece.**
+- Sí aparece la línea `call` con `eth_signTypedData_v4` y el origen.
+
+> El nombre del campo lo elige la dApp, así que ninguna lista de métodos podría
+> anticiparlo. Lo que protege es que la estructura no pasa: solo escalares planos
+> construidos por la wallet.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 89. El badge sobrevive a la muerte del worker
+
+1. **[dApp]** lanza **dos** peticiones que abran ventana (dos firmas seguidas) y
+   **no decidas ninguna**.
+2. El badge de la extensión marca **2**.
+3. Mata el worker (ver el paso 5 de la 82) sin tocar las ventanas.
+4. Despierta al worker abriendo el popup. **[worker]** confirma la línea
+   `background service worker alive`.
+5. **Esperado: el badge sigue diciendo 2.**
+6. Aprueba una. **Esperado: pasa a 1.** Cierra la otra con la X. **Esperado:
+   desaparece**, y **[dApp]** recibe `4001`.
+
+> El texto del badge es estado del NAVEGADOR y sobrevive al worker. Si nadie lo
+> recalculara al arrancar, se quedaría diciendo lo que dijera antes de morir.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 90. La notificación se cierra al resolver, y su clic enfoca
+
+1. **[dApp]** pide una firma. Aparecen la ventana y la notificación.
+2. Manda la ventana al fondo (pincha en otra) y **haz clic en la notificación**.
+   **Esperado: la ventana que YA existía vuelve al frente. NO se abre una
+   segunda.**
+3. Aprueba. **Esperado: la notificación desaparece sola.**
+4. Repite y esta vez **rechaza**. **Esperado: también desaparece.**
+5. Repite y cierra la ventana con la **X**. La solicitud se rechaza con `4001`.
+   Ahora haz clic en la notificación si sigue en pantalla. **Esperado: no pasa
+   nada — no se abre ninguna ventana.**
+
+> El paso 5 es el que importa: cerrar la ventana YA decidió. Reabrirla sería
+> pedir una decisión ya tomada sobre una petición que la dApp ya contestó.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 91. La transferencia interna, y el borde de saldo menos fee
+
+**[popup]**, con al menos dos cuentas y **[T-anvil]** `anvil`.
+
+1. El desplegable de destino **no ofrece la cuenta de origen**.
+2. Escribe `0` → error. `abc` → error. Un número con **19 decimales** → error.
+   El botón *Send* está deshabilitado mientras haya error.
+3. Manda `0.01` a la cuenta 1. **Esperado:** el botón dice *Sending…*, luego
+   aparece el hash, y los saldos de las dos cuentas cambian.
+4. **[popup]** el panel de actividad tiene `transaction sent` y después
+   `transaction confirmed` — y **ninguna de las dos tiene origen**, porque no la
+   pidió ninguna web. Compruébalo con *Copy logs*: esas dos entradas **no llevan
+   campo `origin`**.
+5. **El borde.** Mira el saldo exacto de la cuenta de origen e intenta enviarlo
+   **entero**. **Esperado: se rechaza**, con un mensaje sobre la fee — **no** se
+   abre nada, **no** lo rechaza el nodo después.
+6. **NO se abre ninguna ventana de aprobación** en ningún momento de esta
+   comprobación.
+
+> El paso 5 es la razón de que el techo sea saldo **menos fee**. Si la wallet
+> aceptara y el nodo rechazara después, el usuario aprendería que lo que la
+> wallet acepta no significa nada — y ese hábito es el vector.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 92. El reset, con una dApp conectada delante
+
+Ésta se hace con **[dApp]** abierta y su consola visible **todo el rato**.
+
+1. **[dApp]** conecta la wallet y deja puestos los dos listeners:
+
+   ```js
+   provider.on('accountsChanged', (a) => console.log('accountsChanged →', a))
+   provider.on('disconnect', (e) => console.log('disconnect →', e))
+   ```
+
+2. **[dApp]** lanza una firma y **déjala sin decidir**, con su ventana abierta.
+3. **[popup]** pulsa *Reset wallet* → *Yes, erase it*. **Son dos pasos a
+   propósito**: un solo clic no puede borrar la frase.
+4. **Esperado, en este orden:**
+   - **[dApp]** imprime `accountsChanged → []` **y** `disconnect → {code: 4900…}`;
+   - la firma pendiente se rechaza con **4001** y su ventana **se cierra sola**;
+   - el badge desaparece;
+   - **[popup]** vuelve al onboarding.
+5. **[worker]**:
+
+   ```js
+   await chrome.storage.local.get(null)
+   ```
+
+   **Esperado:** ya no están `cc:mnemonic`, `cc:accounts`, `cc:connectedSites`,
+   `cc:pendingRequests` ni `cc:pendingTxs`. **Sí siguen** `cc:logs`,
+   `cc:networks` y `cc:providerUuid`.
+
+> Los dos eventos, no uno. `accountsChanged: []` dice "ya no tienes cuenta aquí";
+> `disconnect` dice "este proveedor ya no sirve". Una dApp que solo escuche uno
+> se queda a medio enterar.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 93. El registro sobrevive al reset, y la línea del reset está dentro (spec 24)
+
+Justo después de la 92, **sin recargar nada**:
+
+1. **[popup]** completa el onboarding con el mnemonic de Anvil (el panel de
+   actividad no se ve sin wallet).
+2. Mira el panel. **Esperado:**
+   - **las líneas anteriores al reset siguen ahí** — las llamadas de la dApp, los
+     eventos, las operaciones;
+   - **hay una línea `wallet reset`** de nivel `operation`, con `sites: 1`.
+
+> Es auto-referencial a propósito: la línea que anota el borrado sobrevive al
+> borrado que anota. Vaciar la wallet no es lo mismo que borrar lo que pasó, y
+> ésta es la única forma de verlo.
+
+**Y lo que NO debe pasar:** que el panel salga vacío. Si sale vacío, `cc:logs`
+ha caído del lado que muere y la spec 24 está rota.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 94. La alarma no se queda huérfana después de un reset
+
+Camino que no estaba en el plan y que apareció al escribir la 92.
+
+1. **[T-anvil]** `anvil --block-time 600`.
+2. **[dApp]** envía una transacción y apruébala: queda en vuelo.
+3. **[worker]** `await chrome.alarms.getAll()` → **la alarma existe**.
+4. **[popup]** haz un reset completo.
+5. **[worker]**, en los siguientes segundos:
+
+   ```js
+   await chrome.alarms.getAll()   // → []
+   ```
+
+   **Esperado: vacío.** El reset borra `cc:pendingTxs` sin pasar por ninguna
+   reconciliación, así que si la alarma siguiera ahí estaría despertando al
+   worker cada 30 s para mirar una clave que ya no existe.
+
+> No era una fuga permanente —al dispararse, el barrido la habría desarmado—
+> pero sí un despertar para nada, y nada lo delata: no hay error, no hay log, y
+> una alarma no se ve.
+
+> **Resultado:** _(pendiente)_
+
+---
+
+## 95. La tarjeta de la extensión, sin avisos nuevos
+
+Como la 55, repetida porque esta fase añadió un permiso.
+
+En `chrome://extensions`, la tarjeta de CodeCrypto Wallet **no muestra ningún
+error ni aviso**. Y en *Details*, la lista de permisos incluye ahora **alarms**
+además de storage, tabs y notifications.
+
+> `alarms` es un permiso normal, no de host: no pide diálogo al usuario y no roza
+> nada de lo medido en la comprobación 79.
+
+> **Resultado:** _(pendiente)_
