@@ -152,13 +152,27 @@ export interface AmountLimits {
  * saldo, no hay ninguna cantidad válida. Decir "excede el máximo" ahí sería
  * cierto y no ayudaría a nadie.
  */
-export function validateAmount(input: string, { balanceWei, feeWei }: AmountLimits): ValidationResult {
+export function validateAmount(input: string, limits: AmountLimits): ValidationResult {
   const wei = parseAmount(input);
 
   if (wei === null) {
     return invalid(`Enter an amount in ETH, with at most ${ETH_DECIMALS} decimals.`);
   }
-  if (wei === 0n) return invalid("Enter an amount greater than zero.");
+
+  return validateAmountWei(wei, limits);
+}
+
+/**
+ * The same rule, for a caller that already holds wei.
+ *
+ * 🇪🇸 NOTA: existe para que las DOS orillas usen la misma comparación. El popup
+ * llega con lo que el usuario escribió y el background con un `Hex` ya parseado;
+ * si cada uno hiciera su propia resta, un día una de las dos se olvidaría de la
+ * fee — y el síntoma sería que la wallet acepta en el formulario lo que rechaza
+ * al enviar, o al revés.
+ */
+export function validateAmountWei(wei: bigint, { balanceWei, feeWei }: AmountLimits): ValidationResult {
+  if (wei <= 0n) return invalid("Enter an amount greater than zero.");
 
   const spendable = balanceWei - feeWei;
   if (spendable <= 0n) {

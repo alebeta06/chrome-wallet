@@ -889,3 +889,50 @@ input[type="checkbox"] {
 .log-row--error .log-row__level {
   color: var(--error);
 }
+
+/* --------------------------------------------------------------------------
+   Internal transfer (spec 25)
+   -------------------------------------------------------------------------- */
+
+.transfer__from {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.transfer__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.transfer__field select,
+.transfer__field input {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+}
+
+.transfer__field input {
+  font-family: var(--font-mono);
+}
+
+.transfer__hash {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  word-break: break-all;
+}
+
+.banner--ok {
+  border-color: var(--success);
+  color: var(--success);
+}

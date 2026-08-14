@@ -7,6 +7,7 @@ import { AccountRow } from "./AccountRow";
 import { ActivityLog } from "./ActivityLog";
 import { ActiveSiteBand } from "./ActiveSiteBand";
 import { ConnectedSites } from "./ConnectedSites";
+import { InternalTransfer } from "./InternalTransfer";
 import { NetworkSelector } from "./NetworkSelector";
 import { ResetButton } from "./ResetButton";
 
@@ -115,6 +116,13 @@ export function WalletView({ snapshot, onChanged }: WalletViewProps) {
           />
         ))}
       </ul>
+
+      <InternalTransfer
+        accounts={snapshot.accounts}
+        fromIndex={snapshot.defaultAccountIndex}
+        balances={balances}
+        onSent={refreshAll}
+      />
 
       <NetworkSelector
         networks={snapshot.networks}

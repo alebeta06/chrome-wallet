@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ALL_RPC_METHODS,
-  type RpcMethod,
   ErrorCode,
   MAX_LOG_ENTRIES,
   type ConnectedSite,
@@ -28,7 +27,7 @@ import type {
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
 import { createLogWriter } from "@/lib/logs";
-import type { PendingTxStore } from "@/lib/pending-txs";
+import { createPendingTxStore, type PendingTxStore } from "@/lib/pending-txs";
 import { createWalletStorage, type StorageArea, type WalletStorage } from "@/lib/storage";
 import type { NetworkStore } from "@/lib/network-store";
 import type { PermissionsPort } from "@/lib/permissions";
@@ -611,21 +610,21 @@ describe("wallet_reset", () => {
 describe("every method the contract declares", () => {
   /**
    * ------------------------------------------------------------------------
-   * THE KNOWN GAP, DECLARED SO IT CANNOT BE FORGOTTEN
+   * LA LISTA DE EXCEPCIONES ESTÁ VACÍA, Y SE VACIÓ SOLA
    * ------------------------------------------------------------------------
-   * 🇪🇸 NOTA: `wallet_internalTransfer` está en el contrato desde la Fase 3 y no
-   * tiene `case`. Es exactamente el agujero que este bloque existe para
-   * encontrar, y lo encontró en su primera ejecución.
+   * 🇪🇸 NOTA: aquí hubo un `NOT_DISPATCHED_YET` con `wallet_internalTransfer`
+   * dentro — declarado desde la Fase 3 en el contrato y sin `case` en el switch,
+   * que es el agujero que este bloque encontró en su primera ejecución.
    *
-   * Se declara aquí en vez de esconderlo, y la lista se limpia SOLA: el test de
-   * abajo afirma que estos métodos SIGUEN respondiendo 4200, así que en cuanto
-   * se implemente uno se pone rojo y obliga a sacarlo de la lista. Una excepción
-   * que no puede quedarse olvidada, que es lo único que hace tolerable tener
-   * una.
+   * No se quitó porque alguien se acordara: se quitó porque al implementar el
+   * método, el test que afirmaba "estos SIGUEN respondiendo 4200" se puso ROJO y
+   * no dejó otra salida. Ésa era la idea de escribirlo así — **una excepción sin
+   * fecha de caducidad se convierte en la norma; una que rompe al cumplirse se
+   * borra sola.**
+   *
+   * Si alguna vez hace falta otra, que sea con esta misma forma.
    */
-  const NOT_DISPATCHED_YET: RpcMethod[] = ["wallet_internalTransfer"];
-
-  it.each(ALL_RPC_METHODS.filter((method) => !NOT_DISPATCHED_YET.includes(method)))(
+  it.each(ALL_RPC_METHODS)(
     "%s is not answered with 4200",
     async (method) => {
       const { dispatch } = setup(LOADED_WALLET);
@@ -639,16 +638,6 @@ describe("every method the contract declares", () => {
     },
   );
 
-  /** Goes red the moment the gap is closed, which is how the list empties. */
-  it.each(NOT_DISPATCHED_YET)("%s is still the known gap", async (method) => {
-    const { dispatch } = setup(LOADED_WALLET);
-
-    const response = await dispatch(request(method), uiSender(), RUNTIME_ID);
-
-    expect(response.ok).toBe(false);
-    if (!response.ok) expect(response.error.code).toBe(ErrorCode.UNSUPPORTED_METHOD);
-  });
-
   it("still answers 4200 to something the contract never declared", async () => {
     const { dispatch } = setup(LOADED_WALLET);
 
@@ -656,6 +645,179 @@ describe("every method the contract declares", () => {
 
     expect(response.ok).toBe(false);
     if (!response.ok) expect(response.error.code).toBe(ErrorCode.UNSUPPORTED_METHOD);
+  });
+});
+
+// ============================================================================
+// Phase 9 — the internal transfer (spec 25)
+// ============================================================================
+
+describe("wallet_internalTransfer", () => {
+  function transferSetup(seed: Record<string, unknown> = LOADED_WALLET) {
+    const area = createMemoryStorageArea(seed);
+    const storage = createWalletStorage(area);
+    const { sender, sent } = fakeSender();
+    const pendingTxs = createPendingTxStore({
+      storage,
+      logs: createLogWriter(storage),
+      notifier: { announce: async () => {}, dismiss: async () => {}, announceTransaction: async () => {} },
+      readReceipt: async () => null,
+      networkFor: async () => defaultNetworks()[0]!,
+    });
+
+    return {
+      area,
+      sent,
+      dispatch: createDispatcher({
+        storage,
+        sender,
+        logs: createLogWriter(storage),
+        pendingTxs,
+        fetchBalanceAt: async () => "0xde0b6b3a7640000",
+      }),
+    };
+  }
+
+  function transfer(overrides: Record<string, unknown> = {}) {
+    return request("wallet_internalTransfer", [
+      { fromIndex: 0, toIndex: 1, valueWei: "0x2386f26fc10000", ...overrides },
+    ]);
+  }
+
+  it("moves funds between the wallet's own accounts", async () => {
+    const { dispatch, sent } = transferSetup();
+
+    const response = await dispatch(transfer(), uiSender(), RUNTIME_ID);
+
+    expect(response.ok).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].accountIndex).toBe(0);
+    expect(sent[0].transaction.to).toBe(ANVIL_SECOND);
+    expect(sent[0].transaction.value).toBe("0x2386f26fc10000");
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * ONE PIPELINE, TWO DOORS — AND THIS IS HOW YOU SEE IT
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: lo que se afirma no es "llamó a sender.send" —eso lo haría también
+   * un camino bifurcado— sino que dejó los EFECTOS de `signBroadcastAndRecord`:
+   * la línea `operation` del registro y la entrada en `cc:pendingTxs`. Un
+   * segundo camino de firma escrito a mano se olvidaría de los dos, y el
+   * síntoma sería una transferencia que sale bien y de la que no queda rastro
+   * ni aviso de minado.
+   *
+   * Y hay un motivo más duro para que sea el mismo punto: la cola que serializa
+   * los envíos vive en el firmante. Dos caminos son dos transacciones pidiendo
+   * el nonce a la vez — el gotcha 7.8.
+   */
+  it("goes through the shared broadcasting point, leaving its two marks", async () => {
+    const { dispatch, area } = transferSetup();
+
+    await dispatch(transfer(), uiSender(), RUNTIME_ID);
+
+    const operations = logsIn(area).filter((entry) => entry.level === "operation");
+    expect(operations).toHaveLength(1);
+    expect(operations[0].label).toBe("transaction sent");
+
+    const pending = area.snapshot()["cc:pendingTxs"] as Record<string, { hash: string }>;
+    expect(Object.keys(pending)).toHaveLength(1);
+  });
+
+  /**
+   * 🇪🇸 NOTA: `origin` AUSENTE, y es información, no un hueco. Esta transacción
+   * no la pidió ninguna web. Ponerle un origen inventado haría que el registro
+   * afirmara que un sitio pidió algo que ningún sitio pidió.
+   */
+  it("records no origin, because no web page asked for it", async () => {
+    const { dispatch, area } = transferSetup();
+
+    await dispatch(transfer(), uiSender(), RUNTIME_ID);
+
+    const [operation] = logsIn(area).filter((entry) => entry.level === "operation");
+    expect(operation).not.toHaveProperty("origin");
+
+    const pending = Object.values(
+      area.snapshot()["cc:pendingTxs"] as Record<string, Record<string, unknown>>,
+    );
+    expect(pending[0]).not.toHaveProperty("origin");
+  });
+
+  /** The owner acting from their own UI: nothing to approve. */
+  it("opens no approval window", async () => {
+    const opened: string[] = [];
+    const area = createMemoryStorageArea(LOADED_WALLET);
+    const storage = createWalletStorage(area);
+    const { sender } = fakeSender();
+    const dispatch = createDispatcher({
+      storage,
+      sender,
+      logs: createLogWriter(storage),
+      pendingTxs: silentPendingTxs(),
+      fetchBalanceAt: async () => "0xde0b6b3a7640000",
+      approvals: {
+        requestConnect: async () => 0,
+        requestAddChain: async () => {},
+        settle: async () => {},
+        reject: async () => {},
+        read: async () => null,
+        focusWindow: async () => {},
+        requestSignature: async () => {
+          opened.push("signature");
+        },
+      },
+    });
+
+    await dispatch(transfer(), uiSender(), RUNTIME_ID);
+
+    expect(opened).toEqual([]);
+  });
+
+  /** A web page must never reach this method. */
+  it("is refused with 4100 when a page asks for it", async () => {
+    const { dispatch } = transferSetup();
+
+    const response = await dispatch(transfer(), pageSender(), RUNTIME_ID);
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.code).toBe(ErrorCode.UNAUTHORIZED);
+  });
+
+  /**
+   * 🇪🇸 NOTA: el techo es saldo MENOS FEE, y se comprueba aquí con la fee real —
+   * la del formulario es una estimación sin fee. Sin esto el nodo rechazaría
+   * DESPUÉS de que la wallet hubiera dicho que sí.
+   */
+  it("refuses an amount the fee no longer leaves room for", async () => {
+    const area = createMemoryStorageArea(LOADED_WALLET);
+    const storage = createWalletStorage(area);
+    const { sender } = fakeSender();
+    const dispatch = createDispatcher({
+      storage,
+      sender,
+      logs: createLogWriter(storage),
+      pendingTxs: silentPendingTxs(),
+      // Exactly one ETH, and the transfer asks for exactly one ETH.
+      fetchBalanceAt: async () => "0xde0b6b3a7640000",
+    });
+
+    const response = await dispatch(
+      transfer({ valueWei: "0xde0b6b3a7640000" }),
+      uiSender(),
+      RUNTIME_ID,
+    );
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.code).toBe(ErrorCode.INVALID_PARAMS);
+  });
+
+  it("refuses sending to the same account", async () => {
+    const { dispatch, sent } = transferSetup();
+
+    const response = await dispatch(transfer({ toIndex: 0 }), uiSender(), RUNTIME_ID);
+
+    expect(response.ok).toBe(false);
+    expect(sent).toEqual([]);
   });
 });
 

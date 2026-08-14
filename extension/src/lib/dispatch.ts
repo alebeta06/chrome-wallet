@@ -49,11 +49,12 @@ import { createLogEntry, type LogDetail, type LogWriter } from "./logs";
 import { pendingTxFrom, type PendingTxStore } from "./pending-txs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
-import type { TransactionSender } from "./signer";
+import type { FeeEstimate, TransactionSender } from "./signer";
 import { addChain, addNetworkFromWallet, removeNetworkRpc, switchChain } from "./network-rpc";
 import { createNetworkStore, type NetworkStore } from "./network-store";
 import { DEFAULT_CHAIN_ID } from "./networks";
 import { hasPermissionFor, type PermissionsPort } from "./permissions";
+import { validateAmountWei } from "./validators";
 import {
   connectSite,
   disconnectSite,
@@ -62,6 +63,7 @@ import {
   type ConnectedSites,
 } from "./sites";
 import type { WalletStorage } from "./storage";
+import { parseInternalTransfer, transferTransaction } from "./transfer";
 import { parseTransactionRequest, type ParsedTransaction } from "./tx";
 import { domainChainId, parseTypedDataParams } from "./typed-data";
 
@@ -385,6 +387,8 @@ async function handle(
       return handleImportMnemonic(storage, params);
     case "wallet_getState":
       return handleGetState(deps);
+    case "wallet_internalTransfer":
+      return handleInternalTransfer(deps, params);
     case "wallet_getBalances":
       return handleGetBalances(deps, params);
     case "wallet_setDefaultAccount":
@@ -637,6 +641,85 @@ async function handleSendTransaction(
     transaction: prepared,
     origin,
   });
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE SECOND DOOR INTO THE ONE PIPELINE (spec 25)
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: fíjate en lo que este handler NO hace. No firma, no difunde, no
+ * anota la pendiente y no escribe la línea del registro — todo eso lo hace
+ * `signBroadcastAndRecord`, que es exactamente el mismo punto por el que pasa
+ * una `eth_sendTransaction` de una dApp.
+ *
+ * No es elegancia: la cola que serializa los envíos vive dentro del firmante, y
+ * un segundo camino de firma haría que una transferencia del popup y una
+ * transacción de dApp lanzadas a la vez pidieran el nonce en paralelo. Las dos
+ * leerían el mismo, y la segunda moriría con `replacement transaction
+ * underpriced` — el gotcha 7.8, que ya costó encontrarlo una vez.
+ *
+ * `origin` va AUSENTE, y es información y no un hueco: esta transacción no la
+ * pidió ninguna web. Inventarle un origen haría que el registro dijera que un
+ * sitio pidió algo que ningún sitio pidió.
+ */
+async function handleInternalTransfer(deps: HandlerContext, params: unknown[]): Promise<Hex> {
+  const { storage, sender, networks, fetchBalanceAt } = deps;
+
+  const accounts = (await storage.get("cc:accounts")) ?? [];
+  const transfer = parseInternalTransfer(params, accounts.length);
+  const network = await resolveActiveNetwork(networks);
+
+  const transaction = transferTransaction(accounts, transfer);
+
+  /**
+   * 🇪🇸 NOTA: se estima ANTES de comprobar que cabe, porque el techo es saldo
+   * MENOS FEE y sin la fee no hay techo que comprobar. Mismo orden que
+   * `eth_sendTransaction`.
+   */
+  const estimate = await sender.estimate({ network, transaction });
+  const prepared = estimate === null ? transaction : { ...transaction, ...estimate };
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE AUTHORITATIVE CHECK, WITH THE SAME FUNCTION THE FORM USES
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: el formulario ya validó con `validators.ts`, pero con la fee que
+   * pudo estimar desde el popup. Aquí se sabe la de verdad, así que se vuelve a
+   * comprobar — con la MISMA función, no con una resta escrita otra vez.
+   *
+   * Y se comprueba antes de firmar. Sin esto, el nodo rechazaría por fondos
+   * insuficientes después de que la wallet hubiera dicho que sí, que es la forma
+   * de enseñarle al usuario que lo que la wallet acepta no significa nada.
+   */
+  if (estimate !== null) {
+    const balance = await fetchBalanceAt(network, transaction.from, "latest");
+    const fee = feeCeiling(estimate);
+    const fits = validateAmountWei(BigInt(transfer.valueWei), {
+      balanceWei: BigInt(balance),
+      feeWei: fee,
+    });
+
+    if (!fits.ok) throw invalidParams(fits.message);
+  }
+
+  return signBroadcastAndRecord(deps, {
+    network,
+    accountIndex: transfer.fromIndex,
+    transaction: prepared,
+  });
+}
+
+/**
+ * The most this transaction can cost, in wei.
+ *
+ * 🇪🇸 NOTA: el MÁXIMO y no una media. `maxFeePerGas` es el techo que el usuario
+ * autoriza a pagar; lo que se pague de verdad será menos. Reservar el techo hace
+ * que el envío no pueda fallar por fondos, y como mucho deja unos wei sin gastar
+ * — que es el error barato de los dos.
+ */
+function feeCeiling(estimate: FeeEstimate): bigint {
+  const perGas = estimate.txType === 2 ? estimate.maxFeePerGas : estimate.gasPrice;
+  return BigInt(estimate.gas) * BigInt(perGas);
 }
 
 /** What the one broadcasting point needs, from either of its two doors. */
