@@ -17,6 +17,7 @@ import {
   type TabEventMessage,
 } from "@/types/messages";
 
+import { createLogEntry, type LogDetail, type LogWriter } from "./logs";
 import type { ConnectedSites } from "./sites";
 
 /** The two things this module uses from chrome.tabs. */
@@ -61,7 +62,47 @@ export function isAddressableOrigin(origin: Origin): boolean {
   return origin.startsWith("http://") || origin.startsWith("https://");
 }
 
-export function createEventEmitter(tabs: TabsPort): EventEmitter {
+/**
+ * What a caller may want written about an event, as scalars and nothing else.
+ *
+ * 🇪🇸 NOTA: se construye campo a campo por cada tipo de evento en vez de volcar
+ * `data`. `accountsChanged` lleva un array y `disconnect` un error entero; ni
+ * uno ni otro pasarían el filtro del escritor, y volcarlos dejaría un `detail`
+ * vacío sin que nada lo dijera. Aquí se elige QUÉ se quiere ver.
+ */
+export function eventDetail<E extends ProviderEventName>(
+  eventName: E,
+  data: ProviderEventMap[E],
+): LogDetail | undefined {
+  switch (eventName) {
+    case "chainChanged":
+      return { chainId: data as ProviderEventMap["chainChanged"] };
+    case "connect":
+      return { chainId: (data as ProviderEventMap["connect"]).chainId };
+    case "accountsChanged":
+      // The count, not the addresses: whether the origin ended up connected or
+      // disconnected is the question this answers.
+      return { accounts: (data as ProviderEventMap["accountsChanged"]).length };
+    case "disconnect":
+      return { code: (data as ProviderEventMap["disconnect"]).code };
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Inert writer, so a test that only checks targeting need not build a log.
+ *
+ * 🇪🇸 NOTA: éste sí puede ser un valor por defecto, y la diferencia con el del
+ * despachador —que se quitó— es exactamente una: **no crea cadena**. Un
+ * `createLogWriter(storage)` por defecto fabricaba una cadena de serialización
+ * paralela a la del worker, y dos cadenas ciegas la una a la otra pierden
+ * líneas justo bajo concurrencia. Éste no escribe nada, así que no hay nada que
+ * pisar. El único emisor de producción —`background.ts`— pasa el de verdad.
+ */
+const NO_LOGS: LogWriter = { append: () => Promise.resolve() };
+
+export function createEventEmitter(tabs: TabsPort, logs: LogWriter = NO_LOGS): EventEmitter {
   return async function emit(eventName, data, { changedOrigin, connectedSites }) {
     /**
      * 🇪🇸 NOTA: los destinatarios los decide `eventTargets` del CONTRATO, no una
@@ -70,12 +111,60 @@ export function createEventEmitter(tabs: TabsPort): EventEmitter {
      * esa regla se reimplementara en este archivo, habría dos fuentes de verdad
      * y la de aquí se olvidaría de actualizar.
      */
-    const targets = eventTargets(eventName, connectedSites, changedOrigin);
+    const targets = eventTargets(eventName, connectedSites, changedOrigin).filter(
+      isAddressableOrigin,
+    );
+
+    await Promise.all(targets.map((origin) => deliverToOrigin(tabs, origin, eventName, data)));
+
+    await record(logs, eventName, data, targets);
+  };
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE EVENT LOG LIVES HERE, AT THE ONE POINT EVERY EMISSION CROSSES
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: no en los llamadores. Hoy hay cuatro caminos que emiten —el selector
+ * del popup, un `wallet_switchEthereumChain` de una dApp, el clampeo de la
+ * migración al arrancar, y el reset— y todos pasan por `emit`. Escribir la línea
+ * en cada uno significa que el quinto, el que alguien añada dentro de seis
+ * meses, se va a olvidar. Y el síntoma de olvidarlo no es un error: es un
+ * registro que dice que ese evento nunca se emitió.
+ *
+ * Es la misma decisión que la Fase 8 tomó con `chainChanged` dentro de
+ * `setActive()`, aplicada a la otra mitad del problema.
+ *
+ * UNA LÍNEA POR DESTINATARIO, y el destinatario va en `origin`. Una sola línea
+ * con el número de destinos no contestaría la pregunta que las specs 35-36
+ * hacen —si la sincronización llegó a TODAS las pestañas de TODOS los orígenes
+ * conectados—, que es justo lo que un `accountsChanged` mal dirigido rompe.
+ *
+ * Un evento que no alcanzó a nadie deja UNA línea sin `origin`. Ese caso es
+ * información, no ruido: "cambié de red y ninguna dApp se enteró" es
+ * exactamente lo que alguien va a querer ver al reconstruir un fallo.
+ */
+async function record<E extends ProviderEventName>(
+  logs: LogWriter,
+  eventName: E,
+  data: ProviderEventMap[E],
+  targets: Origin[],
+): Promise<void> {
+  const detail = eventDetail(eventName, data);
+
+  try {
+    if (targets.length === 0) {
+      await logs.append(createLogEntry("event", eventName, undefined, detail));
+      return;
+    }
 
     await Promise.all(
-      targets.filter(isAddressableOrigin).map((origin) => deliverToOrigin(tabs, origin, eventName, data)),
+      targets.map((origin) => logs.append(createLogEntry("event", eventName, origin, detail))),
     );
-  };
+  } catch (cause) {
+    // Same rule as everywhere: the log never takes the operation down with it.
+    console.error("[codecrypto] could not log an emitted event:", cause);
+  }
 }
 
 async function deliverToOrigin<E extends ProviderEventName>(

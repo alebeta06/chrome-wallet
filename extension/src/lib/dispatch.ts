@@ -45,7 +45,7 @@ import {
 } from "./chain";
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
-import { createLogEntry, createLogWriter, type LogDetail, type LogWriter } from "./logs";
+import { createLogEntry, type LogDetail, type LogWriter } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
@@ -61,7 +61,7 @@ import {
   type ConnectedSites,
 } from "./sites";
 import type { WalletStorage } from "./storage";
-import { parseTransactionRequest } from "./tx";
+import { parseTransactionRequest, type ParsedTransaction } from "./tx";
 import { domainChainId, parseTypedDataParams } from "./typed-data";
 
 export interface DispatcherDeps {
@@ -96,13 +96,30 @@ export interface DispatcherDeps {
    */
   networks?: NetworkStore;
   /**
-   * Phase 9. The single writer of `cc:logs`.
+   * Phase 9. The single writer of `cc:logs`. REQUIRED, and deliberately so.
    *
-   * 🇪🇸 NOTA: mismo motivo que `networks`, y con la misma consecuencia si se
-   * ignora: el escritor lleva dentro su cadena de serialización, así que dos
-   * instancias son dos cadenas ciegas la una a la otra. El worker pasa la suya.
+   * ------------------------------------------------------------------------
+   * NO DEFAULT HERE. THE DEFAULT WAS THE BUG
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: esto era `logs = createLogWriter(storage)`, y estaba mal por un
+   * motivo que ningún test ni el typecheck pueden ver. El escritor lleva dentro
+   * su cadena de serialización; un valor por defecto fabrica una SEGUNDA cadena,
+   * ciega a la del worker. Dos cadenas ciegas entre sí no serializan nada: las
+   * dos leen el mismo array de `cc:logs` y la segunda escritura se come la
+   * primera.
+   *
+   * Y el síntoma aparece justo donde más duele — bajo concurrencia, o sea
+   * cuando más cosas pasan a la vez, que es exactamente el momento que alguien
+   * va a querer reconstruir después.
+   *
+   * Al ser obligatorio, construir un despachador con una cadena propia por
+   * descuido deja de compilar. Cada test crea el suyo, que es correcto: un test
+   * es su propio mundo y no comparte `cc:logs` con nadie.
+   *
+   * `networks` tiene hoy la MISMA forma (`networks = createNetworkStore(storage)`)
+   * y por tanto la misma trampa, latente porque el worker sí pasa la suya.
    */
-  logs?: LogWriter;
+  logs: LogWriter;
   /** Phase 8. Injected so the snapshot can be built without chrome.permissions. */
   permissions?: PermissionsPort;
   /** Phase 8. Injected so adding a network is testable without a node. */
@@ -193,7 +210,7 @@ export function createDispatcher({
   sender = NO_SENDER,
   activeOrigin = () => Promise.resolve(null),
   networks = createNetworkStore(storage),
-  logs = createLogWriter(storage),
+  logs,
   permissions = ALL_GRANTED,
   readChainId = defaultFetchChainId,
 }: DispatcherDeps): Dispatcher {
@@ -603,12 +620,107 @@ async function handleSendTransaction(
    * puede tardar en decidir, que es la ventana en la que un volcado de memoria
    * del worker sería más probable.
    */
+  return signBroadcastAndRecord(deps, {
+    network,
+    accountIndex,
+    transaction: prepared,
+    origin,
+  });
+}
+
+/** What the one broadcasting point needs, from either of its two doors. */
+interface BroadcastInput {
+  network: NetworkConfig;
+  accountIndex: number;
+  transaction: ParsedTransaction;
+  /** Absent for an internal transfer: the popup is not an origin. */
+  origin?: Origin;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * ONE BROADCASTING POINT, AND THE `operation` LINE LIVES IN IT
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: esto sale del final de `handleSendTransaction` sin cambiar nada, y
+ * el motivo de sacarlo es el mismo que puso el log de eventos dentro de `emit`:
+ * la línea va donde pasan TODOS los caminos, no repetida en cada uno.
+ *
+ * Hoy hay una sola puerta —una dApp llamando a `eth_sendTransaction`—. La Fase 9
+ * abre la segunda: la transferencia interna desde el popup, que NO puede tener
+ * su propio envío (compartir la cola del nonce es lo que impide que dos
+ * transacciones simultáneas cojan el mismo). Entrando las dos por aquí, la
+ * segunda puerta hereda la línea del registro sin que nadie se acuerde de
+ * escribirla.
+ *
+ * `origin` es opcional porque una transferencia interna no tiene origen: la
+ * pide el dueño desde su propia UI. Un `origin` inventado ahí diría que una web
+ * pidió algo que ninguna web pidió.
+ *
+ * 🇪🇸 NOTA: esta es la PRIMERA de las dos líneas que produce una operación —
+ * "enviada", con su hash—. La segunda —"confirmada" o "fallida"— la escribe la
+ * reconciliación de `pendingTxs` al despertar el worker, y todavía no existe:
+ * esperar aquí a `tx.wait()` son 12-15 s en Sepolia, y Chrome mata el worker
+ * mucho antes. El sitio está previsto; el código llega con las notificaciones.
+ */
+async function signBroadcastAndRecord(
+  { storage, sender, logs }: HandlerContext,
+  { network, accountIndex, transaction, origin }: BroadcastInput,
+): Promise<Hex> {
+  /**
+   * 🇪🇸 NOTA: el mnemonic se lee DESPUÉS de la aprobación y no antes. No cambia
+   * nada de seguridad —el background podría leerlo cuando quisiera— pero
+   * mantiene la frase fuera de memoria durante los hasta 120 s que el usuario
+   * puede tardar en decidir, que es la ventana en la que un volcado de memoria
+   * del worker sería más probable.
+   */
   const phrase = await storage.get("cc:mnemonic");
   if (phrase === undefined || phrase.length === 0) {
     throw new ProviderError(ProviderErrors.internal("The wallet has no key to sign with."));
   }
 
-  return sender.send({ network, phrase, accountIndex, transaction: prepared });
+  const hash = await sender.send({ network, phrase, accountIndex, transaction });
+
+  /**
+   * 🇪🇸 NOTA: el `hash` sí, el `to` y el `value` NO, y no es por secreto —los dos
+   * acaban en un explorador de bloques en cuanto la transacción se mina—. Es que
+   * salen del payload de la dApp, y la regla de esta fase es que nada que venga
+   * de la página se reenvía al registro. Con el hash se puede recuperar todo lo
+   * demás de la cadena, que es la fuente que no depende de que confiemos en
+   * nadie.
+   *
+   * Un test que ya existía —"the signing params never reach the log"— lo pilló:
+   * los llevaba puestos y afirma que la dirección de destino no aparece escrita.
+   */
+  await recordOperation(logs, "transaction sent", origin, {
+    chainId: network.chainId,
+    accountIndex,
+    hash,
+  });
+
+  return hash;
+}
+
+/**
+ * Writes an `operation` line (spec 16), and never lets it break the operation.
+ *
+ * 🇪🇸 NOTA: `detail` se construye campo a campo por el llamador, con escalares
+ * que la wallet ya tiene resueltos. `chainId` y `accountIndex` van AQUÍ y no en
+ * las líneas `call`: la pregunta que el registro tiene que poder contestar es
+ * "¿en qué red firmé esto?", no "¿en qué red pregunté un saldo?" — y resolverlos
+ * en cada llamada del provider metería una lectura de estado en el camino
+ * caliente para un dato que solo importa al firmar.
+ */
+async function recordOperation(
+  logs: LogWriter,
+  label: string,
+  origin: Origin | undefined,
+  detail: LogDetail,
+): Promise<void> {
+  try {
+    await logs.append(createLogEntry("operation", label, origin, detail));
+  } catch (cause) {
+    console.error("[codecrypto] could not log an operation:", cause);
+  }
 }
 
 /**
@@ -697,7 +809,20 @@ async function handleSignTypedData(
     throw new ProviderError(ProviderErrors.internal("The wallet has no key to sign with."));
   }
 
-  return sender.signTypedData({ phrase, accountIndex, address, payload });
+  const signature = await sender.signTypedData({ phrase, accountIndex, address, payload });
+
+  /**
+   * 🇪🇸 NOTA: ni el `primaryType` ni el dominio entran en el registro, aunque no
+   * sean secretos. Los elige la dApp, y la regla de esta fase es que nada que
+   * venga de la página se reenvía: lo que se escribe lo resuelve la wallet. El
+   * `label` ya dice qué método fue y `origin` quién lo pidió.
+   */
+  await recordOperation(deps.logs, "message signed", origin, {
+    chainId: network.chainId,
+    accountIndex,
+  });
+
+  return signature;
 }
 
 /**

@@ -284,7 +284,13 @@ describe("createLogWriter", () => {
     ]);
   });
 
-  it("keeps the cap under concurrency instead of overshooting it", async () => {
+  /**
+   * 🇪🇸 NOTA: este test guarda EL TOPE, no la cadena, y el nombre lo dice para
+   * que nadie lo lea como prueba de serialización. Medido: quitando la cadena
+   * sigue verde, porque perder entradas también mantiene el log bajo el tope. El
+   * que prueba la cadena es el de arriba.
+   */
+  it("never overshoots the cap, however many land at once", async () => {
     const { area, writer } = setup({ "cc:logs": seededLogs(MAX_LOG_ENTRIES) });
 
     await Promise.all(

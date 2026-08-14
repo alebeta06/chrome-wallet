@@ -1,13 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConnectedSite, TabEventMessage } from "@/types/messages";
+import type { ConnectedSite, LogEntry, TabEventMessage } from "@/types/messages";
 import {
   createEventEmitter,
+  eventDetail,
   isAddressableOrigin,
   originMatchPattern,
   type TabsPort,
 } from "@/lib/events";
+import { createLogWriter } from "@/lib/logs";
 import type { ConnectedSites } from "@/lib/sites";
+import { createWalletStorage } from "@/lib/storage";
+import { createMemoryStorageArea, type MemoryStorageArea } from "./helpers/memory-storage-area";
 
 const VERCEL = "https://chrome-wallet.vercel.app";
 const LOCAL = "http://localhost:3000";
@@ -43,6 +47,16 @@ function fakeTabs(tabsByOrigin: Record<string, number[]>, failing: number[] = []
   };
 
   return { port, sent };
+}
+
+/** A real writer over an in-memory area, so the assertions read what was written. */
+function fakeLogs() {
+  const area = createMemoryStorageArea();
+  return { area, logs: createLogWriter(createWalletStorage(area)) };
+}
+
+function loggedEvents(area: MemoryStorageArea): LogEntry[] {
+  return (area.snapshot()["cc:logs"] as LogEntry[] | undefined) ?? [];
 }
 
 describe("originMatchPattern", () => {
@@ -369,5 +383,127 @@ describe("chainChanged", () => {
 
     expect(heardTheChain).toEqual([1, 2]);
     expect(heardTheAccount).toEqual([1]);
+  });
+});
+
+// ============================================================================
+// Phase 9 — the event log (spec 14)
+// ============================================================================
+
+describe("the event log", () => {
+  /**
+   * ------------------------------------------------------------------------
+   * THE RECIPIENTS ARE THE POINT
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: no basta con que quede escrito que hubo un `chainChanged`. Lo que
+   * las specs 35-36 afirman es que la sincronización llega a TODOS los orígenes
+   * conectados, y una sola línea con un contador no distingue "llegó a los dos"
+   * de "llegó a uno". Por eso hay una línea por destinatario y el destinatario
+   * va en `origin`.
+   */
+  it("writes one line per origin it reached", async () => {
+    const { port } = fakeTabs({ [VERCEL]: [1], [LOCAL]: [2] });
+    const { area, logs } = fakeLogs();
+    const emit = createEventEmitter(port, logs);
+
+    await emit("chainChanged", "0xaa36a7", {
+      changedOrigin: null,
+      connectedSites: TWO_SITES,
+    });
+
+    const entries = loggedEvents(area);
+    expect(entries).toHaveLength(2);
+    expect(entries.every((entry) => entry.level === "event")).toBe(true);
+    expect(entries.every((entry) => entry.label === "chainChanged")).toBe(true);
+    expect(entries.map((entry) => entry.origin).sort()).toEqual([LOCAL, VERCEL].sort());
+    expect(entries[0]?.detail).toEqual({ chainId: "0xaa36a7" });
+  });
+
+  it("names only the origin an origin-scoped event reached", async () => {
+    const { port } = fakeTabs({ [VERCEL]: [1], [LOCAL]: [2] });
+    const { area, logs } = fakeLogs();
+    const emit = createEventEmitter(port, logs);
+
+    await emit("accountsChanged", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"], {
+      changedOrigin: VERCEL,
+      connectedSites: TWO_SITES,
+    });
+
+    const entries = loggedEvents(area);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.origin).toBe(VERCEL);
+    expect(entries[0]?.detail).toEqual({ accounts: 1 });
+  });
+
+  /**
+   * 🇪🇸 NOTA: "cambié de red y ninguna dApp se enteró" es información, no ruido.
+   * Sin esta línea, el registro no distingue un evento que no alcanzó a nadie de
+   * un evento que nunca se emitió.
+   */
+  it("records an event that reached nobody, with no origin", async () => {
+    const { port } = fakeTabs({});
+    const { area, logs } = fakeLogs();
+    const emit = createEventEmitter(port, logs);
+
+    await emit("chainChanged", "0x7a69", { changedOrigin: null, connectedSites: {} });
+
+    const entries = loggedEvents(area);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.label).toBe("chainChanged");
+    expect(entries[0]).not.toHaveProperty("origin");
+  });
+
+  it("does not count an origin the browser cannot even be asked about", async () => {
+    const { port } = fakeTabs({ [VERCEL]: [1] });
+    const { area, logs } = fakeLogs();
+    const emit = createEventEmitter(port, logs);
+
+    await emit("chainChanged", "0x1", {
+      changedOrigin: null,
+      connectedSites: { ...TWO_SITES, null: site("null", 0) },
+    });
+
+    expect(loggedEvents(area).map((entry) => entry.origin).sort()).toEqual([LOCAL, VERCEL].sort());
+  });
+
+  it("still delivers the event when the log cannot be written", async () => {
+    const complain = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { port, sent } = fakeTabs({ [VERCEL]: [1] });
+    const brokenLogs = { append: () => Promise.reject(new Error("log exploded")) };
+    const emit = createEventEmitter(port, brokenLogs);
+
+    await emit("accountsChanged", [], {
+      changedOrigin: VERCEL,
+      connectedSites: TWO_SITES,
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(complain).toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+});
+
+describe("eventDetail", () => {
+  it("keeps the chain of a chainChanged", () => {
+    expect(eventDetail("chainChanged", "0xaa36a7")).toEqual({ chainId: "0xaa36a7" });
+  });
+
+  it("keeps the chain of a connect", () => {
+    expect(eventDetail("connect", { chainId: "0x1" })).toEqual({ chainId: "0x1" });
+  });
+
+  /**
+   * 🇪🇸 NOTA: el número, no las direcciones. Lo que hay que poder contestar es si
+   * ese origen acabó conectado o desconectado, y para eso basta con contar.
+   */
+  it("counts the accounts of an accountsChanged", () => {
+    expect(eventDetail("accountsChanged", [])).toEqual({ accounts: 0 });
+    expect(eventDetail("accountsChanged", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"])).toEqual({
+      accounts: 1,
+    });
+  });
+
+  it("keeps the code of a disconnect", () => {
+    expect(eventDetail("disconnect", { code: 4900, message: "gone" })).toEqual({ code: 4900 });
   });
 });

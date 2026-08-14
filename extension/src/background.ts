@@ -21,6 +21,7 @@ import { createApprovalCoordinator, type ApprovalWindows } from "@/lib/approvals
 import { pendingBadgeText } from "@/lib/badge";
 import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
+import { createLogWriter } from "@/lib/logs";
 import { createNetworkStore } from "@/lib/network-store";
 import { createPermissionsPort, hasPermissionFor } from "@/lib/permissions";
 import { createTransactionSender } from "@/lib/signer";
@@ -133,7 +134,19 @@ async function activeOrigin(): Promise<Origin | null> {
 // ============================================================================
 
 const approvals = createApprovalCoordinator({ storage, windows });
-const emit = createEventEmitter(tabs);
+
+/**
+ * 🇪🇸 NOTA: UNA instancia, aquí, y pasada a todo lo que escribe en el registro.
+ * El escritor lleva dentro la cadena que serializa las escrituras de `cc:logs`,
+ * y dos instancias son dos cadenas ciegas la una a la otra — que es no tener
+ * cadena, con el agravante de que el síntoma solo aparece bajo concurrencia.
+ * Por eso `DispatcherDeps.logs` es obligatorio y ya no tiene valor por defecto:
+ * así olvidarse de pasarlo no compila. Mismo motivo que `networks` y que el
+ * coordinador de aprobaciones.
+ */
+const logs = createLogWriter(storage);
+
+const emit = createEventEmitter(tabs, logs);
 const sender = createTransactionSender();
 
 /**
@@ -153,6 +166,7 @@ const dispatch = createDispatcher({
   sender,
   activeOrigin,
   networks,
+  logs,
   permissions,
 });
 

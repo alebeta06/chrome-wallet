@@ -25,7 +25,8 @@ import type {
 } from "@/lib/signer";
 import type { EventEmitter } from "@/lib/events";
 import { createDispatcher, type DispatcherDeps } from "@/lib/dispatch";
-import { createWalletStorage, type StorageArea } from "@/lib/storage";
+import { createLogWriter } from "@/lib/logs";
+import { createWalletStorage, type StorageArea, type WalletStorage } from "@/lib/storage";
 import type { NetworkStore } from "@/lib/network-store";
 import type { PermissionsPort } from "@/lib/permissions";
 import { ANVIL_CHAIN_ID, SEPOLIA_CHAIN_ID, defaultNetworks } from "@/lib/networks";
@@ -112,6 +113,12 @@ function setup(
     readKeys,
     dispatch: createDispatcher({
       storage: createWalletStorage(observedArea),
+      /**
+       * 🇪🇸 NOTA: el escritor sale de LA MISMA area que leen las aserciones. Con
+       * dos instancias, el test escribiría en un storage y comprobaría otro —
+       * que es la lección de la Fase 8 sobre los dos `setup()`.
+       */
+      logs: createLogWriter(createWalletStorage(observedArea)),
       ...(fetchBalances === undefined ? {} : { fetchBalances }),
       ...(fetchBalanceAt === undefined ? {} : { fetchBalanceAt }),
       ...extra,
@@ -576,15 +583,15 @@ describe("unexpected failures", () => {
 
   /** A storage layer that blows up, standing in for any dependency going wrong. */
   function brokenStorage() {
-    return createDispatcher({
-      storage: {
-        get: () => Promise.reject(new Error("storage exploded")),
-        set: () => Promise.resolve(),
-        setMany: () => Promise.resolve(),
-        remove: () => Promise.resolve(),
-        resetWallet: () => Promise.resolve(),
-      },
-    });
+    const storage: WalletStorage = {
+      get: () => Promise.reject(new Error("storage exploded")),
+      set: () => Promise.resolve(),
+      setMany: () => Promise.resolve(),
+      remove: () => Promise.resolve(),
+      resetWallet: () => Promise.resolve(),
+    };
+
+    return createDispatcher({ storage, logs: createLogWriter(storage) });
   }
 
   it("never rejects — a thrown dependency becomes a failure response", async () => {
@@ -1334,17 +1341,17 @@ describe("the activity log", () => {
   it("answers the dApp even if the log cannot be written", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const dispatch = createDispatcher({
-      storage: {
-        // Only the log read explodes; everything else behaves like an empty wallet.
-        get: (key: string) =>
-          key === "cc:logs" ? Promise.reject(new Error("log exploded")) : Promise.resolve(undefined),
-        set: () => Promise.resolve(),
-        setMany: () => Promise.resolve(),
-        remove: () => Promise.resolve(),
-        resetWallet: () => Promise.resolve(),
-      },
-    });
+    const storage = {
+      // Only the log read explodes; everything else behaves like an empty wallet.
+      get: (key: string) =>
+        key === "cc:logs" ? Promise.reject(new Error("log exploded")) : Promise.resolve(undefined),
+      set: () => Promise.resolve(),
+      setMany: () => Promise.resolve(),
+      remove: () => Promise.resolve(),
+      resetWallet: () => Promise.resolve(),
+    } as unknown as WalletStorage;
+
+    const dispatch = createDispatcher({ storage, logs: createLogWriter(storage) });
 
     const response = await dispatch(request("eth_chainId"), pageSender(), RUNTIME_ID);
 
@@ -2568,6 +2575,59 @@ describe("the signing params never reach the log", () => {
    * estuviera puesta y nadie tuviera que acordarse de ella mientras escribía el
    * código de firmar. Esto lo comprueba con el método implementado.
    */
+  /**
+   * ------------------------------------------------------------------------
+   * AN OPERATION LEAVES ITS OWN LINE, AT THE ONE POINT BOTH DOORS CROSS
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: la línea `operation` se escribe en `signBroadcastAndRecord`, que es
+   * por donde pasan TODOS los envíos. La Fase 9 abre una segunda puerta —la
+   * transferencia interna desde el popup— y al entrar por el mismo sitio hereda
+   * esta línea sin que nadie tenga que acordarse de escribirla otra vez.
+   */
+  it("writes an operation line with the chain, the account and the hash", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { area, dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(
+      request("eth_sendTransaction", [{ to: ANVIL_SECOND, value: "0x1" }]),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    const operations = logsIn(area).filter((entry) => entry.level === "operation");
+    expect(operations).toHaveLength(1);
+    expect(operations[0].label).toBe("transaction sent");
+    expect(operations[0].origin).toBe(LOCAL);
+    expect(operations[0].detail).toEqual({
+      chainId: ANVIL_CHAIN_ID,
+      accountIndex: 0,
+      hash: TX_HASH,
+    });
+  });
+
+  /**
+   * 🇪🇸 NOTA: la operación produce DOS líneas y ésta es la primera. La segunda
+   * —confirmada o fallida— la escribirá la reconciliación de `pendingTxs` al
+   * despertar el worker: esperar aquí a que se mine son 12-15 s en Sepolia y
+   * Chrome mata el worker mucho antes.
+   */
+  it("writes nothing as an operation when the send fails", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender({ fail: { code: ErrorCode.INTERNAL, message: "boom" } });
+    const { area, dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(
+      request("eth_sendTransaction", [{ to: ANVIL_SECOND, value: "0x1" }]),
+      pageSender(LOCAL),
+      RUNTIME_ID,
+    );
+
+    expect(logsIn(area).filter((entry) => entry.level === "operation")).toEqual([]);
+    // The failure is still on the record, as an error.
+    expect(logsIn(area).some((entry) => entry.level === "error")).toBe(true);
+  });
+
   it("logs the call but redacts what was being signed", async () => {
     const { approvals } = fakeApprovals({ approve: 0 });
     const { sender } = fakeSender();
@@ -2822,6 +2882,21 @@ describe("the typed data never reaches the log", () => {
    * método respondía 4200. Ahora existe de verdad y la regla sigue puesta sin
    * que nadie haya tenido que acordarse de ella.
    */
+  it("writes an operation line for a signature, with no payload in it", async () => {
+    const { approvals } = fakeApprovals({ approve: 0 });
+    const { sender } = fakeSender();
+    const { area, dispatch } = setup(CONNECTED, undefined, undefined, { approvals, sender });
+
+    await dispatch(request("eth_signTypedData_v4", signParams()), pageSender(LOCAL), RUNTIME_ID);
+
+    const operations = logsIn(area).filter((entry) => entry.level === "operation");
+    expect(operations).toHaveLength(1);
+    expect(operations[0].label).toBe("message signed");
+    expect(operations[0].origin).toBe(LOCAL);
+    expect(operations[0].detail).toEqual({ chainId: ANVIL_CHAIN_ID, accountIndex: 0 });
+    expect(JSON.stringify(operations)).not.toContain("Hello, Bob!");
+  });
+
   it("logs the call but redacts the payload", async () => {
     const { approvals } = fakeApprovals({ approve: 0 });
     const { sender } = fakeSender();
