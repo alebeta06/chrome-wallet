@@ -45,7 +45,7 @@ import {
 } from "./chain";
 import { ProviderError, invalidParams, toSerializedError } from "./errors";
 import { MAX_ACCOUNTS, createMnemonic, deriveAddresses } from "./hd-wallet";
-import { appendLog, createLogEntry, redactParams } from "./logs";
+import { createLogEntry, createLogWriter, type LogDetail, type LogWriter } from "./logs";
 import type { ApprovalCoordinator } from "./approvals";
 import type { EventEmitter } from "./events";
 import type { TransactionSender } from "./signer";
@@ -95,6 +95,14 @@ export interface DispatcherDeps {
    * tests, donde el despachador es el único que escribe.
    */
   networks?: NetworkStore;
+  /**
+   * Phase 9. The single writer of `cc:logs`.
+   *
+   * 🇪🇸 NOTA: mismo motivo que `networks`, y con la misma consecuencia si se
+   * ignora: el escritor lleva dentro su cadena de serialización, así que dos
+   * instancias son dos cadenas ciegas la una a la otra. El worker pasa la suya.
+   */
+  logs?: LogWriter;
   /** Phase 8. Injected so the snapshot can be built without chrome.permissions. */
   permissions?: PermissionsPort;
   /** Phase 8. Injected so adding a network is testable without a node. */
@@ -111,6 +119,7 @@ interface HandlerContext {
   sender: TransactionSender;
   activeOrigin: () => Promise<Origin | null>;
   networks: NetworkStore;
+  logs: LogWriter;
   permissions: PermissionsPort;
   readChainId: ChainIdReader;
 }
@@ -184,6 +193,7 @@ export function createDispatcher({
   sender = NO_SENDER,
   activeOrigin = () => Promise.resolve(null),
   networks = createNetworkStore(storage),
+  logs = createLogWriter(storage),
   permissions = ALL_GRANTED,
   readChainId = defaultFetchChainId,
 }: DispatcherDeps): Dispatcher {
@@ -196,6 +206,7 @@ export function createDispatcher({
     sender,
     activeOrigin,
     networks,
+    logs,
     permissions,
     readChainId,
   };
@@ -208,14 +219,27 @@ export function createDispatcher({
       return failure(message.id, ProviderErrors.unauthorized("Unrecognised message sender."));
     }
 
-    // 2. The log goes in BEFORE the work, so a call that never comes back still
-    //    leaves a trace of having been made.
-    await record(storage, context, "call", message.method, redactParams(message.method, message.params));
+    /**
+     * 2. The log goes in BEFORE the work, so a call that never comes back still
+     *    leaves a trace of having been made.
+     *
+     * 🇪🇸 NOTA: no se le pasa `detail`, y la ausencia es la decisión. Antes iba
+     * `redactParams(method, params)`, que devolvía los params tal cual para los
+     * métodos que una denylist no nombraba. Lo que queda escrito es quién llamó
+     * (`origin`) y a qué (`label`), que es lo que las specs 13-16 preguntan.
+     * Nada que venga de la página se reenvía.
+     */
+    await record(logs, context, "call", message.method);
 
     const response = await run(deps, context, message);
 
     if (!response.ok) {
-      await record(storage, context, "error", message.method, {
+      /**
+       * 🇪🇸 NOTA: estos dos campos los genera la wallet, no la página, y son
+       * escalares. Es un `detail` construido a mano —campo a campo— que es
+       * exactamente la forma en que se permite escribir uno.
+       */
+      await record(logs, context, "error", message.method, {
         code: response.error.code,
         message: response.error.message,
       });
@@ -260,16 +284,23 @@ async function run(
  * convertir una llamada correcta en un error para la dApp.
  */
 async function record(
-  storage: WalletStorage,
+  logs: LogWriter,
   context: SenderContext,
   level: "call" | "error",
   method: string,
-  detail: unknown,
+  detail?: LogDetail,
 ): Promise<void> {
   if (!context.fromPage) return;
 
+  /**
+   * 🇪🇸 NOTA: el try/catch se queda aunque `append` ya prometa no rechazar. Lo
+   * que aquí importa no es de quién es la responsabilidad, es que este `await`
+   * está en mitad del camino de una llamada del provider: si algún día `append`
+   * dejara de tragarse un fallo, una firma correcta se convertiría en un error
+   * para la dApp. Dos redes cuestan una línea.
+   */
   try {
-    await appendLog(storage, createLogEntry(level, method, context.origin, detail));
+    await logs.append(createLogEntry(level, method, context.origin, detail));
   } catch (cause) {
     console.error("[codecrypto] could not write to the activity log:", cause);
   }

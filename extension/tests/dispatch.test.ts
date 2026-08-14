@@ -1251,12 +1251,23 @@ describe("the activity log", () => {
     expect(entries[1].detail).toMatchObject({ code: ErrorCode.INVALID_PARAMS });
   });
 
-  it("keeps the params of a harmless public call", async () => {
+  /**
+   * 🇪🇸 NOTA: este test afirmaba lo CONTRARIO —que los params de un método
+   * inofensivo se escribían tal cual—, y era la mitad visible de la denylist:
+   * lo que no estaba en `SECRET_PARAM_METHODS` pasaba entero. Se invierte con
+   * el cambio a allowlist. Ni siquiera una dirección, que no es un secreto, se
+   * reenvía: lo que se escribe lo construye el llamador, campo a campo.
+   */
+  it("writes no params at all, not even for a harmless public call", async () => {
     const { area, dispatch } = setup(LOADED_WALLET, undefined, vi.fn<BalanceAtReader>(async () => "0x0"));
 
     await dispatch(request("eth_getBalance", [ANVIL_FIRST]), pageSender(), RUNTIME_ID);
 
-    expect(logsIn(area)[0].detail).toEqual([ANVIL_FIRST]);
+    const entry = logsIn(area)[0];
+    expect(entry.label).toBe("eth_getBalance");
+    expect(entry.origin).toBe("https://dapp.example");
+    expect(entry).not.toHaveProperty("detail");
+    expect(JSON.stringify(logsIn(area))).not.toContain(ANVIL_FIRST);
   });
 
   /**
@@ -1281,7 +1292,7 @@ describe("the activity log", () => {
         RUNTIME_ID,
       );
 
-      expect(logsIn(area)[0].detail).toBe("[redacted]");
+      expect(logsIn(area)[0]).not.toHaveProperty("detail");
       expect(JSON.stringify(logsIn(area))).not.toContain("0xdeadbeef");
     },
   );
@@ -1295,7 +1306,7 @@ describe("the activity log", () => {
       RUNTIME_ID,
     );
 
-    expect(logsIn(area)[0].detail).toBe("[redacted]");
+    expect(logsIn(area)[0]).not.toHaveProperty("detail");
     expect(JSON.stringify(logsIn(area))).not.toContain("junk");
   });
 
@@ -2570,7 +2581,7 @@ describe("the signing params never reach the log", () => {
 
     const entries = logsIn(area);
     expect(entries[0].label).toBe("eth_sendTransaction");
-    expect(entries[0].detail).toBe("[redacted]");
+    expect(entries[0]).not.toHaveProperty("detail");
     expect(JSON.stringify(entries)).not.toContain("0xdeadbeef");
     expect(JSON.stringify(entries)).not.toContain(ANVIL_SECOND);
   });
@@ -2824,7 +2835,7 @@ describe("the typed data never reaches the log", () => {
 
     const entries = logsIn(area);
     expect(entries[0].label).toBe("eth_signTypedData_v4");
-    expect(entries[0].detail).toBe("[redacted]");
+    expect(entries[0]).not.toHaveProperty("detail");
     expect(JSON.stringify(entries)).not.toContain("Hello, Bob!");
     expect(JSON.stringify(entries)).not.toContain("Ether Mail");
   });
