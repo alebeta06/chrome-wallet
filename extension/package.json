@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "CodeCrypto Wallet — Ethereum wallet as a Chrome MV3 extension",
+  "description": "CodeCrypto Wallet \u2014 Ethereum wallet as a Chrome MV3 extension",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
-    "build": "pnpm typecheck && vite build && vite build -c vite.config.scripts.ts --mode content-script && vite build -c vite.config.scripts.ts --mode inject",
+    "build": "pnpm typecheck && vite build && vite build -c vite.config.scripts.ts --mode content-script && vite build -c vite.config.scripts.ts --mode inject && pnpm check:bundles",
+    "check:bundles": "node scripts/check-bundles.mjs",
     "test": "vitest",
     "test:run": "vitest run",
     "icons": "node scripts/generate-icons.mjs"

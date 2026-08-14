@@ -66,8 +66,21 @@ Tres pasadas: una ESM (HTML + background) y una IIFE por cada script clásico
 (`content-script`, `inject`). Chrome los carga como scripts clásicos: si el
 bundle emite `import`/`export`, fallan en runtime.
 
-Verificación obligatoria tras cualquier cambio de build:
-`grep -E '^\s*(import|export)\s' dist/content-script.js dist/inject.js` → vacío.
+Verificación obligatoria: **`pnpm check:bundles`**, que `pnpm build` ya corre al
+final y que falla con salida distinta de cero. Comprueba dos cosas contra lo que
+el build EMITIÓ, no contra lo que creemos que emite:
+
+1. que `content-script.js` e `inject.js` no lleven `import`/`export` de nivel
+   superior — si los llevan, Chrome no los inyecta y no avisa;
+2. que **ethers no sea alcanzable desde ninguna página**, siguiendo el grafo de
+   imports desde cada `.html`. Por alcanzabilidad y no por carpeta: `background.js`
+   importa chunks de `assets/`, así que prohibir esa carpeta daría falsos
+   positivos y, el día que Rollup mueva el código, falsos negativos.
+
+Los dos vivían solo aquí, comprobados a mano cuando alguien se acordaba. El de
+ethers se comprobó por primera vez en la Fase 9 —nueve fases después de
+escribirlo— y resultó estar bien; pero "resultó estar bien" no es "está
+garantizado", y la diferencia solo se nota el día que deja de estarlo.
 
 Los tres scripts de extensión solo importan de `types/messages.ts` y de
 utilidades puras sin estado. Nada con estado a nivel de módulo: cada pasada
