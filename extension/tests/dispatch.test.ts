@@ -1848,20 +1848,118 @@ describe("wallet_reset with connected sites", () => {
    * que ya no existe hasta que alguien recargase — la wallet vacía y la web
    * diciendo que tienes fondos.
    */
+  /**
+   * 🇪🇸 NOTA: ahora son DOS eventos por sitio, no uno. `accountsChanged: []` dice
+   * "ya no tienes cuenta aquí" y `disconnect` dice "este proveedor ya no sirve".
+   * Una dApp que solo escuche uno de los dos se queda a medio enterar.
+   */
   it("tells every connected origin before wiping them", async () => {
     const { emit, emitted } = recordingEmitter();
     const { area, dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
 
     await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
 
-    expect(emitted).toHaveLength(2);
-    expect(emitted.map((entry) => entry.changedOrigin).sort()).toEqual([LOCAL, VERCEL].sort());
-    expect(emitted.every((entry) => entry.eventName === "accountsChanged")).toBe(true);
-    expect(emitted.every((entry) => Array.isArray(entry.data) && entry.data.length === 0)).toBe(true);
+    const accounts = emitted.filter((entry) => entry.eventName === "accountsChanged");
+    const disconnects = emitted.filter((entry) => entry.eventName === "disconnect");
+
+    expect(accounts.map((entry) => entry.changedOrigin).sort()).toEqual([LOCAL, VERCEL].sort());
+    expect(disconnects.map((entry) => entry.changedOrigin).sort()).toEqual([LOCAL, VERCEL].sort());
+    expect(accounts.every((entry) => Array.isArray(entry.data) && entry.data.length === 0)).toBe(
+      true,
+    );
+    expect(emitted).toHaveLength(4);
 
     expect(area.snapshot()["cc:connectedSites"]).toBeUndefined();
     // Logs still survive a reset.
     expect(area.keys()).not.toContain("cc:mnemonic");
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE RECIPIENTS ARE READ BEFORE THE WIPE, OR THERE ARE NO RECIPIENTS
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: si el borrado fuera primero, la lista de a quién avisar sería
+   * justamente una de las claves borradas. El síntoma no sería un error: sería
+   * un reset silencioso que deja a las dApps creyendo que siguen conectadas.
+   */
+  it("emits after the wipe has been decided but with the sites it read first", async () => {
+    const { emit, emitted } = recordingEmitter();
+    const { dispatch } = setup(TWO_CONNECTED, undefined, undefined, { emit });
+
+    await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
+
+    // Both origins heard about it, which is only possible if they were read
+    // before cc:connectedSites stopped existing.
+    expect(new Set(emitted.map((entry) => entry.changedOrigin))).toEqual(
+      new Set([LOCAL, VERCEL]),
+    );
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * NOBODY IS LEFT WAITING ON A WALLET THAT NO LONGER EXISTS
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: sin esto, una dApp con una firma pendiente se queda colgada hasta
+   * el timeout completo —dos minutos— esperando a una wallet que se acaba de
+   * vaciar. Y no recibe un error: recibe silencio, que es peor, porque su UI se
+   * queda en "esperando confirmación" sin nada que la saque de ahí.
+   */
+  it("answers every waiting request with 4001 before wiping", async () => {
+    const rejected: Array<{ requestId: string; code: number }> = [];
+    const approvals = {
+      requestConnect: () => Promise.resolve(0),
+      requestSignature: () => Promise.resolve(),
+      requestAddChain: () => Promise.resolve(),
+      settle: () => Promise.resolve(),
+      read: () => Promise.resolve(null),
+      focusWindow: () => Promise.resolve(),
+      reject: async (requestId: string, error: { code: number }) => {
+        rejected.push({ requestId, code: error.code });
+      },
+    };
+    const { dispatch } = setup(
+      { ...TWO_CONNECTED, "cc:pendingRequests": { "req-a": {}, "req-b": {} } },
+      undefined,
+      undefined,
+      { approvals },
+    );
+
+    await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
+
+    expect(rejected.map((entry) => entry.requestId).sort()).toEqual(["req-a", "req-b"]);
+    expect(rejected.every((entry) => entry.code === ErrorCode.USER_REJECTED)).toBe(true);
+  });
+
+  /**
+   * ------------------------------------------------------------------------
+   * THE LINE OUTLIVES THE RESET THAT WROTE IT (spec 24)
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: es auto-referencial a propósito, y es la prueba visible de que
+   * vaciar la wallet no es lo mismo que borrar lo que pasó. Si `cc:logs` cayera
+   * del lado que muere, esta línea se borraría en el mismo movimiento que la
+   * escribe y no quedaría rastro de que hubo un reset.
+   */
+  it("writes a line that survives the reset, next to what was already there", async () => {
+    const before: LogEntry = { id: "old", ts: 1, level: "call", label: "eth_chainId" };
+    const { area, dispatch } = setup({ ...TWO_CONNECTED, "cc:logs": [before] });
+
+    await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
+
+    const entries = logsIn(area);
+    expect(entries.map((entry) => entry.label)).toEqual(["eth_chainId", "wallet reset"]);
+    expect(entries[1].level).toBe("operation");
+    expect(entries[1].detail).toMatchObject({ sites: 2 });
+  });
+
+  it("wipes cc:pendingTxs along with the rest", async () => {
+    const { area, dispatch } = setup({
+      ...TWO_CONNECTED,
+      "cc:pendingTxs": { "0x7a69:0xdead": { hash: "0xdead", chainId: "0x7a69", sentAt: 0, accountIndex: 0 } },
+    });
+
+    await dispatch(request("wallet_reset"), uiSender(), RUNTIME_ID);
+
+    expect(area.keys()).not.toContain("cc:pendingTxs");
   });
 
   it("emits nothing when no site was connected", async () => {

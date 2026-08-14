@@ -376,7 +376,20 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || changes["cc:pendingTxs"] === undefined) return;
 
   const now = changes["cc:pendingTxs"].newValue as Record<string, unknown> | undefined;
-  if (now === undefined || Object.keys(now).length === 0) return;
+
+  /**
+   * 🇪🇸 NOTA: la clave se vació o desapareció. Pasa al resolverse la última
+   * transacción —donde `sweep` ya habrá desarmado— pero TAMBIÉN al hacer un
+   * reset, que borra la clave sin pasar por ninguna reconciliación. Sin esto, la
+   * alarma seguía armada vigilando algo que ya no existe hasta que se disparaba
+   * sola y se daba cuenta.
+   */
+  if (now === undefined || Object.keys(now).length === 0) {
+    void txWatcher.standDown().catch((cause: unknown) => {
+      console.error(`[${PROTOCOL}] could not stand down the transaction alarm:`, cause);
+    });
+    return;
+  }
 
   void txWatcher.noteNewWork().catch((cause: unknown) => {
     console.error(`[${PROTOCOL}] could not start watching a transaction:`, cause);

@@ -179,3 +179,38 @@ describe("noteNewWork", () => {
     });
   });
 });
+
+describe("standDown", () => {
+  /**
+   * ------------------------------------------------------------------------
+   * THE PATH NEITHER OF US HAD ON THE LIST
+   * ------------------------------------------------------------------------
+   * 🇪🇸 NOTA: `sweep` no es el único camino que deja la lista vacía. El RESET
+   * borra `cc:pendingTxs` entera y no pasa por ninguna reconciliación, así que
+   * la alarma se quedaba armada vigilando una clave que ya no existe.
+   *
+   * No era una fuga permanente —al dispararse otra vez, `sweep` la desarmaba
+   * sola— pero sí un despertar del worker para nada, y nada lo delataba: no hay
+   * error, no hay log, y el usuario no ve una alarma. Exactamente la familia de
+   * fallos mudos de esta fase.
+   */
+  it("takes the alarm down without asking the chain anything", async () => {
+    const { watcher, cleared, created, pendingTxs } = setup();
+
+    await watcher.standDown();
+
+    expect(cleared).toEqual([TX_ALARM]);
+    expect(created).toEqual([]);
+    // There is nothing to reconcile: the list is gone, not resolved.
+    expect(pendingTxs.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("is safe to call when no alarm was armed", async () => {
+    const { watcher, cleared } = setup();
+
+    await watcher.standDown();
+    await watcher.standDown();
+
+    expect(cleared).toEqual([TX_ALARM, TX_ALARM]);
+  });
+});

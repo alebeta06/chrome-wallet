@@ -1159,19 +1159,80 @@ async function handleGetPendingRequest(
 }
 
 /**
- * 🇪🇸 NOTA: el reset avisa a todos los sitios que estuvieran conectados ANTES de
- * borrar nada. Sin eso, cada dApp abierta seguiría enseñando una cuenta que ya
- * no existe hasta que alguien recargara — y la wallet estaría vacía mientras la
- * web dice que tienes fondos.
+ * ---------------------------------------------------------------------------
+ * RESETTING IS AN EVENT OUTWARDS, NOT ONLY A LOCAL WIPE
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: borrar las claves es la parte fácil. Lo que no se ve si solo se borra
+ * es que fuera queda gente esperando: una dApp con una firma pendiente se
+ * quedaría colgada hasta el timeout, y cada web abierta seguiría enseñando una
+ * cuenta que ya no existe hasta que alguien recargara — la wallet vacía y la
+ * página diciendo que tienes fondos.
+ *
+ * El orden importa y es éste:
+ *
+ *   1. contestar a todo el que espera, con 4001;
+ *   2. avisar a los sitios conectados de que se quedan sin cuenta;
+ *   3. borrar;
+ *   4. dejarlo escrito.
+ *
+ * DOS PASOS DE LA LISTA NO ESTÁN AQUÍ, Y ES A PROPÓSITO. Cerrar las ventanas de
+ * aprobación abiertas es consecuencia de (1) —`reject` cierra la ventana y quita
+ * su notificación— y refrescar el badge es consecuencia de que (1) escriba
+ * `cc:pendingRequests`, que dispara el listener del worker. Llamarlos aquí sería
+ * una segunda fuente de verdad para algo que ya pasa solo.
+ *
+ * Avisar ANTES de borrar y no después: si el borrado fallara a mitad, una dApp
+ * que se cree desconectada de una wallet que sigue entera se arregla recargando;
+ * una dApp que se cree conectada a una wallet ya vaciada firma contra el vacío.
+ * De los dos fallos posibles se elige el que se recupera solo.
  */
-async function handleReset({ storage, emit }: HandlerContext): Promise<null> {
-  const sites = (await storage.get("cc:connectedSites")) ?? {};
+async function handleReset({ storage, emit, approvals, logs }: HandlerContext): Promise<null> {
+  /**
+   * 🇪🇸 NOTA: las dos lecturas van ANTES de tocar nada. Después del borrado no
+   * hay forma de saber a quién había que avisar — es la lista de destinatarios
+   * la que se está borrando.
+   */
+  const [storedSites, storedPending] = await Promise.all([
+    storage.get("cc:connectedSites"),
+    storage.get("cc:pendingRequests"),
+  ]);
+  const connectedSites = storedSites ?? {};
+
+  for (const requestId of Object.keys(storedPending ?? {})) {
+    await approvals.reject(
+      requestId,
+      ProviderErrors.userRejected("The wallet was reset while this request was waiting."),
+    );
+  }
+
+  /**
+   * 🇪🇸 NOTA: los dos eventos, y `disconnect` no sobra. `accountsChanged: []`
+   * dice "ya no tienes cuenta aquí"; `disconnect` dice "este proveedor ya no
+   * sirve". Una dApp que solo escuche el primero se queda sin cuenta pero sigue
+   * creyendo que hay wallet detrás; una que solo escuche el segundo no limpia la
+   * cuenta que tiene pintada. Los dos son de ámbito `origin` según el contrato,
+   * así que van uno por sitio conectado.
+   */
+  for (const origin of Object.keys(connectedSites)) {
+    await emit("accountsChanged", [], { changedOrigin: origin, connectedSites });
+    await emit("disconnect", ProviderErrors.disconnected("The wallet was reset."), {
+      changedOrigin: origin,
+      connectedSites,
+    });
+  }
 
   await storage.resetWallet();
 
-  for (const origin of Object.keys(sites)) {
-    await emit("accountsChanged", [], { changedOrigin: origin, connectedSites: sites });
-  }
+  /**
+   * 🇪🇸 NOTA: esta línea sobrevive al reset que la escribe, y es la prueba
+   * visible de la spec 24 — `cc:logs` no está en `RESET_CLEARED_KEYS` porque
+   * vaciar la wallet no es lo mismo que borrar lo que pasó. Se escribe DESPUÉS
+   * del borrado para que diga que ocurrió, no que iba a ocurrir.
+   */
+  await recordOperation(logs, "wallet reset", undefined, {
+    sites: Object.keys(connectedSites).length,
+    pendingRequests: Object.keys(storedPending ?? {}).length,
+  });
 
   return null;
 }

@@ -74,6 +74,18 @@ export interface TxWatcher {
    * devolver `null`.
    */
   noteNewWork(): Promise<void>;
+  /**
+   * There is nothing left to watch: take the alarm down.
+   *
+   * 🇪🇸 NOTA: existe porque `sweep` no es el único camino que vacía la lista. El
+   * RESET la borra entera, y por ahí no pasa ninguna reconciliación — la alarma
+   * se quedaba armada vigilando una clave que ya no existe, y solo se enteraba
+   * al dispararse otra vez. Un despertar del worker para nada.
+   *
+   * Colgado del cambio en storage, cubre ese camino y cualquier otro que aparezca
+   * después, que es la razón de no llamarlo desde el reset directamente.
+   */
+  standDown(): Promise<void>;
 }
 
 export interface TxWatcherDeps {
@@ -123,5 +135,9 @@ export function createTxWatcher({
     }, FAST_PATH_DELAY_MS);
   }
 
-  return { sweep, noteNewWork };
+  async function standDown(): Promise<void> {
+    await alarms.clear(TX_ALARM);
+  }
+
+  return { sweep, noteNewWork, standDown };
 }
