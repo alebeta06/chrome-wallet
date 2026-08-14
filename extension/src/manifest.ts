@@ -44,7 +44,12 @@ const manifest: chrome.runtime.ManifestV3 = {
     type: "module",
   },
 
-  permissions: ["storage", "tabs", "notifications"],
+  /**
+   * 🇪🇸 NOTA: `alarms` es obligatorio para `chrome.alarms`, y sin él la API
+   * simplemente no existe. Es un permiso normal, no de host: no roza nada de lo
+   * medido en la comprobación 79 ni pide diálogo al usuario.
+   */
+  permissions: ["storage", "tabs", "notifications", "alarms"],
 
   /** Local Anvil node and the public Sepolia endpoint. Nothing else. */
   host_permissions: ["http://localhost:8545/*", "https://ethereum-sepolia-rpc.publicnode.com/*"],

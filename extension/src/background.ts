@@ -24,6 +24,7 @@ import { createEventEmitter, type TabsPort } from "@/lib/events";
 import { createLogWriter } from "@/lib/logs";
 import { createNotifier, requestIdFromNotification } from "@/lib/notifications";
 import { createPendingTxStore } from "@/lib/pending-txs";
+import { TX_ALARM, createTxWatcher } from "@/lib/tx-watcher";
 import { fetchReceipt } from "@/lib/chain";
 import { createNetworkStore } from "@/lib/network-store";
 import { createPermissionsPort, hasPermissionFor } from "@/lib/permissions";
@@ -318,6 +319,68 @@ async function ensureProviderUuid(area: WalletStorage): Promise<void> {
 
 void ensureProviderUuid(storage).catch((cause: unknown) => {
   console.error(`[${PROTOCOL}] could not seed the provider uuid:`, cause);
+});
+
+// ============================================================================
+// Pending transactions — the wait that lives on disk
+// ============================================================================
+
+const txWatcher = createTxWatcher({
+  pendingTxs,
+  alarms: {
+    create: async (name, info) => {
+      await chrome.alarms.create(name, info);
+    },
+    clear: async (name) => {
+      await chrome.alarms.clear(name);
+    },
+  },
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * RE-ARMED ON EVERY START, BECAUSE ALARMS DO NOT RELIABLY SURVIVE THE WORKER
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la documentación de Chrome lo dice sin rodeos — *"it is best to make
+ * sure important alarms exist each time your service worker starts up"*. Una
+ * alarma no es estado del que uno pueda fiarse entre reinicios del worker.
+ *
+ * Sin este barrido, un worker que muriera con transacciones en vuelo las dejaría
+ * SIN VIGILAR PARA SIEMPRE: la alarma no vuelve sola, nadie pregunta por el
+ * recibo, y el usuario no recibe el aviso de algo que sí se minó. Y no habría
+ * ningún error en ninguna parte.
+ *
+ * `sweep` hace las dos mitades a la vez: pregunta por lo que hubiera pendiente
+ * —que es justo el caso del despertar— y deja la alarma acorde con lo que quede.
+ */
+void txWatcher.sweep().catch((cause: unknown) => {
+  console.error(`[${PROTOCOL}] could not resolve pending transactions on startup:`, cause);
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== TX_ALARM) return;
+
+  void txWatcher.sweep().catch((cause: unknown) => {
+    console.error(`[${PROTOCOL}] could not resolve pending transactions:`, cause);
+  });
+});
+
+/**
+ * 🇪🇸 NOTA: se cuelga del CAMBIO EN STORAGE y no de una llamada desde el
+ * despachador, por el mismo motivo que el badge: es el punto por el que pasan
+ * todos los caminos que crean trabajo nuevo, incluida la transferencia interna
+ * de la Fase 9 y cualquier otro que aparezca después. Colgarlo del despachador
+ * obligaría a cada camino nuevo a acordarse.
+ */
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || changes["cc:pendingTxs"] === undefined) return;
+
+  const now = changes["cc:pendingTxs"].newValue as Record<string, unknown> | undefined;
+  if (now === undefined || Object.keys(now).length === 0) return;
+
+  void txWatcher.noteNewWork().catch((cause: unknown) => {
+    console.error(`[${PROTOCOL}] could not start watching a transaction:`, cause);
+  });
 });
 
 /**
