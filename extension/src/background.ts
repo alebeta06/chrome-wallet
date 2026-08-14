@@ -18,7 +18,7 @@ import {
 } from "@/types/messages";
 
 import { createApprovalCoordinator, type ApprovalWindows } from "@/lib/approvals";
-import { pendingBadgeText } from "@/lib/badge";
+import { createBadge } from "@/lib/badge";
 import { createDispatcher } from "@/lib/dispatch";
 import { createEventEmitter, type TabsPort } from "@/lib/events";
 import { createLogWriter } from "@/lib/logs";
@@ -256,21 +256,28 @@ chrome.permissions.onRemoved.addListener((removed) => {
  * usuario tiene una ventana de aprobación abierta, el worker se duerme, y al
  * despertar el badge dice que no hay nada pendiente.
  */
-async function refreshBadge(): Promise<void> {
-  const text = pendingBadgeText(await storage.get("cc:pendingRequests"), Date.now());
+const badge = createBadge(storage, {
+  setText: (text) => chrome.action.setBadgeText({ text }),
+  setBackgroundColor: (color) => chrome.action.setBadgeBackgroundColor({ color }),
+});
 
-  await chrome.action.setBadgeText({ text });
-  if (text.length > 0) await chrome.action.setBadgeBackgroundColor({ color: "#7c5cff" });
-}
+/**
+ * 🇪🇸 NOTA: el color, UNA vez y aquí. Antes se pintaba dentro del refresco y solo
+ * cuando había texto, así que se reescribía el mismo valor en cada cambio de
+ * `cc:pendingRequests`. No depende de cuántas solicitudes haya: es constante.
+ */
+void badge.paintBackground().catch((cause: unknown) => {
+  console.error(`[${PROTOCOL}] could not colour the badge:`, cause);
+});
 
-void refreshBadge().catch((cause: unknown) => {
+void badge.refresh().catch((cause: unknown) => {
   console.error(`[${PROTOCOL}] could not restore the badge:`, cause);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || changes["cc:pendingRequests"] === undefined) return;
 
-  void refreshBadge().catch((cause: unknown) => {
+  void badge.refresh().catch((cause: unknown) => {
     console.error(`[${PROTOCOL}] could not refresh the badge:`, cause);
   });
 });
