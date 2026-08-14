@@ -47,6 +47,7 @@ import {
 } from "@/types/messages";
 
 import { ProviderError } from "./errors";
+import { createSerializer } from "./serialize";
 import type { WalletStorage } from "./storage";
 
 /** The approved half of a decision. What a waiter resolves with. */
@@ -169,17 +170,10 @@ export function createApprovalCoordinator({
    * llamada no escriba nada. Al quitar la deduplicación para firmas —que hay que
    * quitarla— la carrera queda expuesta.
    *
-   * La cadena vive en el closure, como todo lo demás aquí. Si el worker muere no
-   * hay escrituras en vuelo contra las que serializar.
+   * La cadena es SUYA y vive en este closure, como todo lo demás aquí. El
+   * mecanismo y sus límites están en `serialize.ts`.
    */
-  let writes: Promise<unknown> = Promise.resolve();
-
-  function serialize<T>(task: () => Promise<T>): Promise<T> {
-    // Both branches run the task: a previous failure must not stall the chain.
-    const next = writes.then(task, task);
-    writes = next.catch(() => undefined);
-    return next;
-  }
+  const serialize = createSerializer();
 
   /**
    * 🇪🇸 NOTA: los caducados se descartan al LEER, no con un temporizador global.

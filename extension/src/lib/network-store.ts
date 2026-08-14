@@ -39,6 +39,7 @@ import {
   upsertNetwork,
   type RemovalResult,
 } from "./networks";
+import { createSerializer } from "./serialize";
 import type { WalletStorage } from "./storage";
 
 /**
@@ -90,7 +91,13 @@ export function createNetworkStore(
   storage: WalletStorage,
   emit: EventEmitter = NO_EMIT,
 ): NetworkStore {
-  let writes: Promise<unknown> = Promise.resolve();
+  /**
+   * 🇪🇸 NOTA: `cc:networks` es un array entero en una sola clave, así que dar de
+   * alta o borrar una red es un read-modify-write, y dos a la vez se pisan. La
+   * cadena es SUYA: el mecanismo y —sobre todo— lo que NO cubre están en
+   * `serialize.ts`.
+   */
+  const serialize = createSerializer();
 
   /**
    * ------------------------------------------------------------------------
@@ -113,13 +120,6 @@ export function createNetworkStore(
       // but neither is a reason to fail the write that already landed.
       console.error("[codecrypto] could not announce the chain change:", cause);
     }
-  }
-
-  /** Both branches run the task: a previous failure must not stall the chain. */
-  function serialize<T>(task: () => Promise<T>): Promise<T> {
-    const next = writes.then(task, task);
-    writes = next.catch(() => undefined);
-    return next;
   }
 
   /**

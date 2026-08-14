@@ -28,6 +28,7 @@ import {
 import { createRpcProvider } from "./chain";
 import { ProviderError } from "./errors";
 import { deriveSigner } from "./hd-wallet";
+import { createSerializer } from "./serialize";
 import type { ParsedTransaction } from "./tx";
 import { signableTypes } from "./typed-data";
 
@@ -141,15 +142,12 @@ export function createTransactionSender(
    * Que la cola no sobreviva al reinicio del worker da igual: si el worker
    * murió, no hay envíos en vuelo contra los que serializar. Mismo razonamiento
    * que el Map de esperantes de `approvals.ts`.
+   *
+   * Es la MISMA herramienta que ordena las escrituras de storage —`serialize.ts`—
+   * usada aquí para otra cosa: lo compartido no es una clave, es el nonce de la
+   * cuenta. Cada dueño crea la suya, y ésta no se cruza con ninguna otra.
    */
-  let queue: Promise<unknown> = Promise.resolve();
-
-  function serialize<T>(task: () => Promise<T>): Promise<T> {
-    // Both branches run the task: one failed send must not stall every later one.
-    const next = queue.then(task, task);
-    queue = next.catch(() => undefined);
-    return next;
-  }
+  const serialize = createSerializer();
 
   async function estimate({
     network,
