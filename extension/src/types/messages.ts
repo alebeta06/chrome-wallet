@@ -578,7 +578,7 @@ interface PendingRequestBase {
   origin: Origin;
   createdAt: number;
   expiresAt: number;
-  /** Set once the approval window exists, so windows.onRemoved can map back. */
+  /** Set once the approval window exists, so it can be closed or focused later. */
   windowId?: number;
   /** Tab that originated the request, for focus-back after the decision. */
   tabId?: number;
