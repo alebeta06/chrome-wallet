@@ -324,6 +324,47 @@ export function createApprovalCoordinator({
            * un fallo, no merece un banner rojo. Un código propio haría que las
            * dApps que ya ramifican por 4001 enseñaran un error donde debería
            * haber silencio. El motivo real va en el mensaje y en `cc:logs`.
+           *
+           * ------------------------------------------------------------------
+           * ESA DECISIÓN QUEDÓ EN DUDA. LÍMITE CONOCIDO, NO ARREGLADO
+           * ------------------------------------------------------------------
+           * 🇪🇸 NOTA: la **comprobación manual 89** (Chrome, 18/08/2026) dejó ver
+           * el error tal cual lo recibe una dApp:
+           *
+           *     { "code": 4001, "message": "The request timed out after 120 seconds." }
+           *
+           * `4001` es *User rejected the request*, y aquí **el usuario no
+           * rechazó nada**. No dijo que no: no dijo nada.
+           *
+           * **El contraste lo hace evidente.** Los otros dos caminos que
+           * responden 4001 llevan mensajes coherentes con el código — *"The
+           * approval window was closed."* y *"The wallet was reset while this
+           * request was waiting."* En los dos, alguien ACTUÓ. En el timeout no
+           * actuó nadie, y el mensaje lo dice mientras el código dice lo
+           * contrario. Ninguna dApp ramifica por el texto del mensaje.
+           *
+           * **Lo que el argumento de arriba no vio:** un timeout es
+           * ACCIONABLE —"vuelve a intentarlo"— y un rechazo no lo es. Tratarlos
+           * igual le quita a la dApp la única reacción útil que tenía.
+           *
+           * **Qué código sería el correcto.** No hay ninguno en EIP-1193 para
+           * "el usuario nunca contestó". El candidato es **-32002 *Resource
+           * unavailable*** de EIP-1474, en el rango -32000..-32099 que
+           * JSON-RPC 2.0 reserva para errores definidos por el servidor: el
+           * recurso sería la decisión del usuario, que nunca llegó a estar
+           * disponible. Es algo forzado, y se dice; a favor tiene que MetaMask
+           * ya usa -32002 para un caso vecino ("ya hay una solicitud
+           * pendiente"), así que las dApps tienen más probabilidad de manejarlo
+           * que un código inventado de cero.
+           *
+           * **Por qué no se cambia aquí y ahora:** adoptarlo exige una entrada
+           * nueva en `ErrorCode`, que vive en `types/messages.ts` — el contrato.
+           * Ampliarlo es legítimo, pero es una decisión propia con su commit,
+           * no un arreglo de última hora. Y cambia lo que ven dApps ya escritas.
+           *
+           * Ver también el límite del `onDisconnect` en `background.ts`: son las
+           * dos mitades del mismo problema — quién se entera de que una
+           * solicitud murió, y qué se le cuenta a quien esperaba.
            */
           void reject(
             requestId,

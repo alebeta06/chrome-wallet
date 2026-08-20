@@ -444,6 +444,42 @@ chrome.notifications.onClicked.addListener((notificationId) => {
  *
  * El nombre del puerto lleva el requestId dentro (`approvalPortName` en el
  * contrato), así que sabemos exactamente qué solicitud rechazar.
+ *
+ * ---------------------------------------------------------------------------
+ * LÍMITE CONOCIDO: CON EL WORKER MUERTO, CERRAR LA VENTANA NO RECHAZA NADA
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: encontrado en la **comprobación manual 89** (Chrome, 18/08/2026).
+ *
+ * Este mecanismo depende de que haya un puerto vivo que se desconecte. Si Chrome
+ * ya suspendió el worker, **no hay puerto que caiga**, así que cerrar
+ * `notification.html` con la X no produce el `4001`. La solicitud se queda en
+ * `cc:pendingRequests` hasta caducar.
+ *
+ * Y lo que lo hace peor que un residuo: **la dApp no recibe NADA**. Se comprobó
+ * con los dos `.catch()` puestos en la página, y ninguno imprimió. Su promesa
+ * queda colgada los 120 s completos, con la UI en "esperando confirmación" y sin
+ * nada que la saque de ahí.
+ *
+ * El puerto sigue siendo la elección correcta —cubre además que la página
+ * crashee o navegue, que `chrome.windows.onRemoved` no cubre— pero tiene este
+ * suelo, y el suelo es el ciclo de vida del propio worker.
+ *
+ * ---------------------------------------------------------------------------
+ * PREGUNTA ABIERTA, ANOTADA SIN RESPONDER
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: la caducidad limpia el estado interno —`approvals.read()` descarta lo
+ * expirado— pero **no avisa a nadie**. ¿Debería la reconciliación de arranque
+ * rechazar explícitamente las caducadas con `4001` en vez de descartarlas en
+ * silencio?
+ *
+ * A favor: hoy la dApp espera 120 s sin recibir nada, y el worker que arranca
+ * SABE que esa solicitud murió.
+ * En contra: a los 120 s la dApp ya recibió su rechazo por el temporizador —
+ * salvo que el worker muriera antes de que saltara, que es justo este caso.
+ *
+ * No se responde aquí porque depende de si el temporizador sobrevivió, y eso
+ * hay que medirlo antes de decidir. Ver también la nota del código del timeout
+ * en `lib/approvals.ts`, que es la otra mitad de este problema.
  */
 chrome.runtime.onConnect.addListener((port) => {
   const requestId = parseApprovalPortName(port.name);

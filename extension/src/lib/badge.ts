@@ -27,6 +27,36 @@ import type { WalletStorage } from "./storage";
  * 🇪🇸 NOTA: cuenta solo las VIVAS. Una solicitud caducada sigue en storage hasta
  * que algo la lee y la descarta (ver `approvals.ts`), así que contarlas todas
  * dejaría el badge con un número fantasma después de un timeout.
+ *
+ * ---------------------------------------------------------------------------
+ * LÍMITE CONOCIDO: ESTO ES CORRECTO Y AUN ASÍ EL BADGE SE QUEDA OBSOLETO
+ * ---------------------------------------------------------------------------
+ * 🇪🇸 NOTA: encontrado en la **comprobación manual 89** (Chrome, 18/08/2026). El
+ * badge mostró `1` con CERO solicitudes vivas. Se reprodujo cerrando una ventana
+ * de aprobación con el worker muerto: la solicitud no se rechazó, caducó a los
+ * 120 s, y el badge se quedó con el número anterior.
+ *
+ * **La hipótesis natural es falsa, y se descartó midiendo.** No es que esta
+ * función cuente mal las caducadas: se inyectó una entrada con `expiresAt: 0` y
+ * el badge quedó **vacío**, no en `1`. La derivación de aquí es correcta.
+ *
+ * **El fallo está en el DISPARO, no en el cálculo.** `refreshBadge()` se invoca
+ * desde `chrome.storage.onChanged` sobre `cc:pendingRequests` — y **una
+ * caducidad no es una escritura**. El tiempo pasa, `expiresAt` se queda atrás,
+ * nadie toca storage, no hay evento, y nadie recalcula.
+ *
+ * **Por qué no se arregla en la Fase 9.** Se autocorrige con cualquier escritura
+ * posterior y al arrancar el worker, así que la ventana está acotada y el
+ * síntoma es cosmético. Y las dos salidas cuestan:
+ *
+ *   - un temporizador que despierte al worker cuando expire la siguiente
+ *     solicitud mete estado temporal exactamente donde MV3 más muerde — es la
+ *     lección de la Fase 6 con otro disfraz;
+ *   - recalcular al leer ya se hace, pero solo cuando alguien lee, que es
+ *     justamente lo que no ocurre con el popup cerrado.
+ *
+ * No es una línea, así que no se improvisa al final de una fase. Queda escrito
+ * aquí, que es donde lo va a leer quien toque esto.
  */
 export function pendingBadgeText(
   pending: Record<RequestId, PendingRequest> | undefined,
