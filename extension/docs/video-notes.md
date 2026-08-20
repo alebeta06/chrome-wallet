@@ -154,3 +154,43 @@ content script estrecho + comodín intacto    →  revoca de verdad
 > y la invariante que el proyecto afirmaba de sí mismo era falsa desde el primer
 > día. Solo se cae midiendo — y midiendo sobre el artefacto que envías, no sobre
 > uno parecido.
+
+---
+
+## Fase 9
+
+### Corrección de hecho: quién caza el cierre de la ventana
+
+**Antes de grabar nada sobre el flujo de aprobación, esto:** el rechazo `4001`
+cuando el usuario cierra la ventana con la X **NO** lo produce
+`chrome.windows.onRemoved`. Este proyecto **no usa esa API en ningún sitio**.
+
+Lo caza el **`onDisconnect` del puerto keep-alive** que `connect.html` y
+`notification.html` abren contra el service worker (`background.ts`). El nombre
+del puerto lleva el `requestId` dentro, así que se sabe exactamente qué solicitud
+rechazar.
+
+Y la diferencia no es de nombres, que es lo que la hace contable:
+
+| | cierra con la X | la página crashea | la página navega a otro sitio |
+|---|---|---|---|
+| `windows.onRemoved` | sí | **no** | **no** |
+| `port.onDisconnect` | sí | **sí** | **sí** |
+
+En los tres casos la ventana deja de poder decidir, así que en los tres hay que
+rechazar. El puerto los cubre porque **cae por sí solo**: no hay que enumerar los
+motivos por los que una ventana deja de estar.
+
+> Generalizable, y es el ángulo para la cámara: **el mecanismo que se cae solo
+> gana al que hay que acordarse de disparar.** Un listener de "ventana cerrada"
+> obliga a enumerar todas las formas de dejar de estar; un puerto que se
+> desconecta no distingue entre ellas porque no le hace falta.
+
+**El límite, que también va dicho:** si el service worker ya está suspendido, no
+hay puerto que caiga, así que cerrar la ventana no rechaza nada y la dApp espera
+los 120 s completos sin recibir error. Está medido (comprobación 89) y anotado
+junto al propio `onDisconnect`.
+
+> **Ojo al guion:** el enunciado del proyecto (§7.4) dice `windows.onRemoved`. Es
+> un error de hecho del documento, no del código. Si el guion lo copia, el vídeo
+> explica un mecanismo que la wallet no tiene.
