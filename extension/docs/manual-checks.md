@@ -1907,11 +1907,27 @@ a las builtin, que explica por qué eso arregla también los perfiles existentes
 
 # Fase 9 — Registro, avisos, reset y transferencias internas
 
-> **Fecha y navegador, en cada una.** Las 79-81 dejaron escrito de dónde salía
-> cada dato y por eso se pudieron releer un mes después. Estas nacen con el
-> hueco puesto: al pasarlas, rellena `Resultado` con **navegador + versión +
-> fecha**. Una comprobación sin esa línea no vale para discutirla luego — es la
-> lección de la 79, que midió `remove()` en Brave y viajó a Chrome.
+> **Pasadas el 17-18 de agosto de 2026 en Chrome Stable. 14 de 14, sin
+> bloqueantes.** Cada una lleva su `Resultado` con navegador y fecha, por la
+> lección de la 79 — aquella midió `remove()` en Brave y la conclusión viajó a
+> Chrome sin que nadie lo notara al releerla.
+>
+> **Lo que NO salió limpio, y está dicho donde toca:**
+>
+> - la **89** es PARCIAL: destapó que el badge se queda obsoleto cuando una
+>   solicitud caduca en vez de resolverse. Diagnóstico completo en
+>   `lib/badge.ts`;
+> - el sub-paso **(5) de la 87** no es reproducible con el registro lleno, y se
+>   dice en vez de darlo por bueno;
+> - la **82** necesitó dos intentos de setup, y el primero dio un falso
+>   negativo. El intento fallido está escrito porque explica por qué el setup
+>   final es el que es.
+>
+> Otros dos límites conocidos, encontrados durante estas comprobaciones y
+> anotados en el código en vez de en una lista aparte: cerrar la ventana de
+> aprobación con el worker muerto no produce el `4001` (ver el `onDisconnect`
+> del puerto en `background.ts`), y el timeout de 120 s responde `4001`, que
+> significa otra cosa (ver el temporizador en `lib/approvals.ts`).
 
 ## Las cinco superficies, y en cuál va cada paso
 
@@ -2000,7 +2016,35 @@ sí se minó. Sin ningún error en ninguna parte.
 > existiera — la comprobación pasaría por el motivo equivocado. Borrarla es lo
 > que hace que esto mida el rearme y no la persistencia de Chrome.
 
-> **Resultado:** _(pendiente — anota navegador, versión y fecha)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Y el setup costó dos intentos, que es parte del
+> hallazgo.
+>
+> **El intento que falló:** con `anvil --block-time 60` y con `600`, la
+> transacción **se minó durante los ~30 s de espera** del paso 5, así que
+> `standDown` desarmó la alarma correctamente y el paso 7 devolvía `[]`. Un
+> **falso negativo**: parecía que el rearme no funcionaba cuando lo que pasaba
+> es que ya no había nada que rearmar. Sirvió de paso para verificar algo que
+> esta comprobación no buscaba — que el barrido de arranque **reconcilia,
+> notifica y limpia**, no solo rearma.
+>
+> **El setup que sirve es `anvil --no-mining`**, que deja la transacción en
+> vuelo indefinidamente.
+>
+> Secuencia final: tx en vuelo → alarma armada → **borrada a mano** →
+> DevTools y pestaña de la dApp cerrados, ~30 s quieto, tarjeta en
+> *service worker (inactive)* → popup abierto → línea `background service
+> worker alive` confirmada → `chrome.alarms.getAll()` devuelve
+> `codecrypto:pending-txs` con `periodInMinutes: 0.5` **y un `scheduledTime`
+> POSTERIOR al `sentAt` de la pendiente** — o sea una alarma NUEVA, no la vieja
+> resucitada. La pendiente seguía viva. Después, `cast rpc anvil_mine` →
+> notificación y línea `transaction confirmed`, con **8 minutos entre
+> `transaction sent` y `transaction confirmed`** y el worker muerto y
+> reiniciado en medio.
+>
+> **Y el paso 4 no sobraba, con nombre y todo:** las alarmas de esta extensión
+> llevan `persistAcrossSessions: true`. Sin borrarla a mano, el paso 7 habría
+> medido **la persistencia de Chrome** en vez del rearme, y habría pasado
+> aunque el barrido no existiera.
 
 ---
 
@@ -2020,7 +2064,9 @@ aviso llegaría medio minuto tarde para algo instantáneo.
 > los 3 s, el aviso llegaría igualmente pero al saltar la alarma. Que tarde 30 s
 > no es un fallo; que no llegue nunca sí.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Tres segundos exactos — 4:27:37 → 4:27:40 — y las
+> dos líneas `operation` (`transaction sent` y `transaction confirmed`). Camino
+> rápido confirmado: no esperó a la alarma.
 
 ---
 
@@ -2046,7 +2092,14 @@ aviso llegaría medio minuto tarde para algo instantáneo.
 > Si quieres verlo del todo, mata el worker en el paso 4 antes de que se mine:
 > el aviso llega igual cuando la alarma lo despierta.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Sepolia real, con Anvil apagado. La clave fue
+> `0xaa36a7:0x537810a3…` — **el chainId de Sepolia y no el de Anvil**, así que
+> la identidad compuesta distingue redes dentro del mismo historial, que es
+> justo para lo que se eligió. Espera real de 12-15 s con el navegador quieto y
+> la notificación llegó.
+>
+> Es el escenario que un `await tx.wait()` no habría sobrevivido nunca, medido
+> contra red de verdad y no contra un nodo local.
 
 ---
 
@@ -2069,7 +2122,15 @@ revertida** — gastó gas y está en la cadena).
 > esto sale rojo, alguien ha cambiado el nivel y el rojo ha dejado de significar
 > algo concreto.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Contrato en `0xe7f1725E…` con runtime
+> `0x60006000fd`, **verificado con `cast code` y `cast call` ANTES de medir**.
+> Eso no es celo: una dirección sin código acepta una transferencia
+> normalmente, así que medir sobre ella habría dado un falso negativo — la
+> transacción se habría confirmado y la comprobación habría "fallado" por el
+> motivo equivocado.
+>
+> Receipt con `status 0`, notificación **"Transaction reverted"**, línea de
+> nivel `operation`, y **no aparece bajo el filtro Errors**.
 
 ---
 
@@ -2106,7 +2167,14 @@ La hora no se espera: se falsea la fecha de envío.
 - **NO** aparece ninguna notificación de escritorio: al usuario no le ha pasado
   nada nuevo.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Con `sentAt` envejecido a −61 minutos:
+> `cc:pendingTxs` quedó en `{}` y salió la línea `stopped tracking
+> transaction` con `waitedMinutes: 61`. **No dice "failed"** y **no hubo
+> notificación**, que eran las dos mitades.
+>
+> Detalle que confirma el diseño: esta línea **sí lleva origen**, porque la
+> transacción venía de la dApp — al contrario que las de la 91, que no lo
+> llevan porque no las pidió ninguna web.
 
 ---
 
@@ -2135,7 +2203,23 @@ firma algo, provoca un error).
 7. **En vivo.** Deja el popup abierto y provoca actividad desde **[dApp]**.
    **Esperado:** el panel se actualiza **sin cerrarlo y abrirlo**.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA**, con un sub-paso no reproducible y dicho.
+>
+> (1) Solo las de nivel `error` en rojo. (2) Los cinco filtros funcionan uno a
+> uno. (3) Un bucle de cinco `eth_chainId` dio **una fila con `×6`** — la sexta
+> era una llamada previa idéntica y adyacente, o sea que el colapso funcionó
+> exactamente como debe. (6) *Copy logs* → JSON válido. (7) Actualización en
+> vivo con el popup en pestaña propia y F5 en la dApp.
+>
+> **(4) es el que importa, y salió: A, A, B, A → TRES filas** —
+> `eth_chainId ×8`, `eth_accounts`, `eth_chainId`. El `eth_accounts` **parte el
+> run**. Si el panel agrupara salteado habrían salido dos filas con `×9`.
+>
+> **(5) NO REPRODUCIBLE, y se deja escrito en vez de darlo por bueno:** el
+> registro ya tiene entradas de los cuatro niveles, así que ningún filtro queda
+> vacío y el segundo mensaje no se puede provocar. Los dos textos están
+> cubiertos por los tests de `log-view.ts`. No se vació `cc:logs` a propósito,
+> para no arriesgar el historial que la 93 necesita.
 
 ---
 
@@ -2167,7 +2251,17 @@ await provider.request({
 > anticiparlo. Lo que protege es que la estructura no pasa: solo escalares planos
 > construidos por la wallet.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Con un EIP-712 cuyo campo `userBackupPhrase` lo
+> inventó la dApp: **ni el nombre del campo ni la frase** aparecen en
+> `cc:logs`. Sí está la línea `call` con su origen, y la `operation` con
+> `accountIndex` y `chainId` y nada más.
+>
+> **Hallazgo lateral, guardado como material de vídeo:** el volcado contiene
+> entradas **anteriores al commit del escritor nuevo** con el payload completo
+> de `wallet_addEthereumChain` dentro — `chainName`, `rpcUrls`,
+> `nativeCurrency`— y otras con `detail: "[redacted]"`. Es la denylist vieja y
+> su agujero, visibles en el propio dato: lo que la lista nombraba salía
+> tapado, y lo que no nombraba salía entero.
 
 ---
 
@@ -2186,7 +2280,19 @@ await provider.request({
 > El texto del badge es estado del NAVEGADOR y sobrevive al worker. Si nadie lo
 > recalculara al arrancar, se quedaría diciendo lo que dijera antes de morir.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PARCIAL.** Los pasos 1-4 pasan: el badge marca **2**,
+> sobrevive a la muerte del worker, y la línea `background service worker
+> alive` confirma el reinicio.
+>
+> **El paso 6 destapó un fallo real, que NO se arregla en esta fase:** el badge
+> se queda obsoleto cuando una solicitud **caduca** en vez de resolverse. Se
+> vio "1" con cero solicitudes vivas.
+>
+> El diagnóstico completo —incluida la hipótesis equivocada, descartada por
+> medición— está **en `lib/badge.ts`**, junto a la nota del descarte por
+> `expiresAt`. Resumen: la derivación es correcta y descarta las caducadas; lo
+> que falla es el DISPARO, porque `refreshBadge()` se cuelga de
+> `storage.onChanged` y **una caducidad no es una escritura**.
 
 ---
 
@@ -2205,7 +2311,17 @@ await provider.request({
 > El paso 5 es el que importa: cerrar la ventana YA decidió. Reabrirla sería
 > pedir una decisión ya tomada sobre una petición que la dApp ya contestó.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA**, verificado por la consola de **[worker]** y no
+> por lo que se veía en pantalla: Windows retenía las notificaciones con
+> prioridad *Normal*, y hubo que subirlas a *Primera* para verlas. Que la
+> comprobación no dependiera de eso es lo que la salvó.
+>
+> El id es `codecrypto:` + el requestId exacto. Clic → **una ventana antes, una
+> después**: no se creó una segunda. Tras aprobar, la notificación de la
+> solicitud desaparece y **solo quedan las de `codecrypto:tx:`** — el otro
+> espacio de ids, y el caso real que habría provocado la colisión de prefijos
+> que se corrigió al escribirlo. Cierre con la X → `4001 The approval window
+> was closed.`, con 0 ventanas, 0 pendientes y 0 notificaciones.
 
 ---
 
@@ -2232,7 +2348,19 @@ await provider.request({
 > aceptara y el nodo rechazara después, el usuario aprendería que lo que la
 > wallet acepta no significa nada — y ese hábito es el vector.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** El desplegable excluye la cuenta activa. *Send*
+> deshabilitado con `0`, con `abc` y con 19 decimales. 0.01 ETH → hash, bloque
+> 7, notificación. **CERO ventanas de aprobación** en todo el recorrido.
+>
+> Las dos líneas `operation` muestran origen **`wallet`** y no una URL — que es
+> la etiqueta que el panel pinta cuando la entrada **no tiene origen**.
+> Contraste directo con las de la 83 y la 85, que muestran
+> `http://localhost:3000`.
+>
+> **El borde:** 9999.9598 (el saldo completo) rechazado **en el formulario**
+> con *"That is more than this account can send once the fee is taken out"* —
+> sin abrir nada y **sin viajar al nodo**. Que el rechazo llegue antes del
+> nodo es exactamente el punto de que el techo sea saldo menos fee.
 
 ---
 
@@ -2269,7 +2397,21 @@ await provider.request({
 > `disconnect` dice "este proveedor ya no sirve". Una dApp que solo escuche uno
 > se queda a medio enterar.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Con la dApp conectada y una firma pendiente:
+> `accountsChanged → []`, `4001 "The wallet was reset while this request was
+> waiting."` y `disconnect → 4900 "The wallet was reset."`. La ventana se cerró
+> sola, el badge desapareció y el popup volvió al onboarding.
+>
+> Storage: sobreviven `cc:chainId`, `cc:logs`, `cc:networks` y
+> `cc:providerUuid`; mueren `cc:mnemonic`, `cc:accounts`, `cc:connectedSites`,
+> `cc:pendingRequests` y `cc:pendingTxs`.
+>
+> **Apareció además `cc:spike`**, residuo manual de los spikes de las
+> comprobaciones 79 y 81 (`surface: 'popup-window'`, 15 entradas). No lo
+> escribe ningún código. **Que sobreviva es CORRECTO**, y conviene decir por
+> qué: `RESET_CLEARED_KEYS` es una lista explícita de lo que el código conoce,
+> no un "borra todo menos". Un reset que borrara claves ajenas estaría
+> decidiendo sobre datos que no son suyos. Borrada a mano.
 
 ---
 
@@ -2291,7 +2433,13 @@ Justo después de la 92, **sin recargar nada**:
 **Y lo que NO debe pasar:** que el panel salga vacío. Si sale vacío, `cc:logs`
 ha caído del lado que muere y la spec 24 está rota.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Tras reimportar, el historial anterior al reset
+> está intacto, y dentro está la línea `wallet reset` de nivel `operation`, con
+> origen `wallet` y `detail` = `{"pendingRequests":1,"sites":1}` — o sea que
+> registra **qué se llevó por delante** ese reset concreto.
+>
+> Y no es un número fijo: en el reset de la comprobación 94, la misma línea
+> salió con `pendingRequests: 0`. El detalle refleja cada caso.
 
 ---
 
@@ -2317,7 +2465,13 @@ Camino que no estaba en el plan y que apareció al escribir la 92.
 > pero sí un despertar para nada, y nada lo delata: no hay error, no hay log, y
 > una alarma no se ve.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Antes del reset: alarma armada y una pendiente en
+> vuelo. Después: `chrome.alarms.getAll()` → `[]` y `cc:pendingTxs` →
+> `undefined`.
+>
+> El desarme lo hizo el **listener de storage** llamando a `standDown`, sin
+> ninguna llamada explícita desde el reset — que era el motivo de ponerlo en el
+> punto común y no en el camino que lo destapó.
 
 ---
 
@@ -2332,4 +2486,18 @@ además de storage, tabs y notifications.
 > `alarms` es un permiso normal, no de host: no pide diálogo al usuario y no roza
 > nada de lo medido en la comprobación 79.
 
-> **Resultado:** _(pendiente)_
+> **Resultado (Chrome Stable · 17-18 de agosto de 2026): PASA.** Tarjeta sin errores, con *Collect errors* activo.
+>
+> **Y una trampa que conviene dejar escrita:** la UI de *Details* lista solo
+> `tabs` y `notifications`. Chrome **no muestra** `storage` ni `alarms` porque
+> los clasifica como permisos sin advertencia al usuario, así que esa pantalla
+> **no sirve** para comprobar que el permiso está. La fuente correcta es el
+> manifest cargado:
+>
+> ```js
+> chrome.runtime.getManifest().permissions
+> // → ['storage', 'tabs', 'notifications', 'alarms']
+> ```
+>
+> Mirar la UI y concluir que falta `alarms` habría sido leer el artefacto
+> equivocado — la comprobación 79 otra vez, en pequeño.
